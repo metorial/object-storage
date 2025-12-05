@@ -1,6 +1,6 @@
 # Object Storage Client for TypeScript
 
-TypeScript/JavaScript client library for interacting with the Object Storage Service.
+TypeScript/JavaScript client library for interacting with the [Metorial Object Storage Service](https://github.com/metorial/object-storage).
 
 ## Usage
 

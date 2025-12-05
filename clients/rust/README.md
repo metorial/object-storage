@@ -1,6 +1,16 @@
 # Object Storage Client for Rust
 
-Rust client library for interacting with the Object Storage Service.
+Async Rust client library for interacting with the [Metorial Object Storage Service](https://github.com/metorial/object-storage).
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+object-store-client = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
 
 ## Usage
 

@@ -286,7 +286,7 @@ impl ObjectStoreClient {
         }
 
         if !params.is_empty() {
-            url.push_str("?");
+            url.push('?');
             url.push_str(&params.join("&"));
         }
 

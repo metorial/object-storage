@@ -1,6 +1,12 @@
 # Object Storage Client for Go
 
-Go client library for interacting with the Object Storage Service.
+Go client library for interacting with the [Metorial Object Storage Service](https://github.com/metorial/object-storage).
+
+## Installation
+
+```bash
+go get github.com/metorial/object-storage/clients/go
+```
 
 ## Usage
 
@@ -11,7 +17,7 @@ import (
     "fmt"
     "log"
 
-    objectstorage "object-storage-client"
+    objectstorage "github.com/metorial/object-storage/clients/go"
 )
 
 func main() {

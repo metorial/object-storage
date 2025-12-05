@@ -1,12 +1,15 @@
 [package]
 name = "object-store-client"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["Object Storage Team"]
-license = "MIT"
-description = "Rust client for Object Storage Service"
-repository = "https://github.com/your-org/object-storage"
-keywords = ["object-storage", "s3", "client"]
+license = "Apache-2.0"
+description = "Async Rust client library for Object Storage Service - S3-compatible object storage"
+repository = "https://github.com/metorial/object-storage"
+homepage = "https://github.com/metorial/object-storage"
+documentation = "https://docs.rs/object-store-client"
+readme = "README.md"
+keywords = ["object-storage", "s3", "client", "async"]
 categories = ["api-bindings", "web-programming::http-client"]
 
 [workspace]
