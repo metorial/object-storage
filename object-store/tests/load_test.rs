@@ -1,6 +1,6 @@
 use object_store::metadata::MetadataStore;
 use object_store::service::ObjectStoreService;
-use object_store_backends::{Backend, local::LocalBackend};
+use object_store_backends::{local::LocalBackend, Backend};
 use std::sync::Arc;
 use std::time::Instant;
 use tempfile::TempDir;
@@ -14,11 +14,7 @@ async fn setup_test_service() -> (Arc<ObjectStoreService>, TempDir) {
 
     backend.init().await.unwrap();
 
-    let metadata = Arc::new(
-        MetadataStore::new(backend.clone())
-            .await
-            .unwrap(),
-    );
+    let metadata = Arc::new(MetadataStore::new(backend.clone()).await.unwrap());
 
     let service = Arc::new(ObjectStoreService::new(backend, metadata));
 
@@ -60,7 +56,10 @@ async fn test_concurrent_writes() {
     let results = futures::future::join_all(handles).await;
 
     let duration = start.elapsed();
-    let success_count = results.iter().filter(|r| r.as_ref().unwrap().is_ok()).count();
+    let success_count = results
+        .iter()
+        .filter(|r| r.as_ref().unwrap().is_ok())
+        .count();
 
     println!(
         "Concurrent writes: {} operations in {:?} ({:.2} ops/sec)",
@@ -114,7 +113,10 @@ async fn test_concurrent_reads() {
     let results = futures::future::join_all(handles).await;
 
     let duration = start.elapsed();
-    let success_count = results.iter().filter(|r| r.as_ref().unwrap().is_ok()).count();
+    let success_count = results
+        .iter()
+        .filter(|r| r.as_ref().unwrap().is_ok())
+        .count();
 
     println!(
         "Concurrent reads: {} operations in {:?} ({:.2} ops/sec)",
@@ -187,7 +189,10 @@ async fn test_mixed_operations() {
     let results = futures::future::join_all(handles).await;
 
     let duration = start.elapsed();
-    let success_count = results.iter().filter(|r| r.as_ref().unwrap().is_ok()).count();
+    let success_count = results
+        .iter()
+        .filter(|r| r.as_ref().unwrap().is_ok())
+        .count();
 
     println!(
         "Mixed operations: {} operations in {:?} ({:.2} ops/sec)",
@@ -196,7 +201,10 @@ async fn test_mixed_operations() {
         success_count as f64 / duration.as_secs_f64()
     );
 
-    println!("✓ {} of {} operations succeeded", success_count, num_operations);
+    println!(
+        "✓ {} of {} operations succeeded",
+        success_count, num_operations
+    );
     assert!(success_count > num_operations * 9 / 10); // At least 90% success
 }
 
@@ -207,9 +215,9 @@ async fn test_large_file_handling() {
 
     service.create_bucket("load-test-bucket").await.unwrap();
 
-    let sizes = vec![
-        1024,           // 1 KB
-        1024 * 1024,    // 1 MB
+    let sizes = [
+        1024,            // 1 KB
+        1024 * 1024,     // 1 MB
         5 * 1024 * 1024, // 5 MB
     ];
 
@@ -262,11 +270,7 @@ async fn test_distributed_locking() {
             let metadata = metadata.clone();
             let resource = resource.to_string();
             let owner = format!("worker-{}", i);
-            tokio::spawn(async move {
-                metadata
-                    .try_acquire_lock(&resource, &owner, 5)
-                    .await
-            })
+            tokio::spawn(async move { metadata.try_acquire_lock(&resource, &owner, 5).await })
         })
         .collect();
 
@@ -277,7 +281,10 @@ async fn test_distributed_locking() {
         .filter(|r| r.as_ref().unwrap().as_ref().unwrap() == &true)
         .count();
 
-    println!("Lock acquisition: {} of {} attempts succeeded", acquired_count, num_attempts);
+    println!(
+        "Lock acquisition: {} of {} attempts succeeded",
+        acquired_count, num_attempts
+    );
 
     // With concurrent attempts, typically only one should succeed initially
     // Others might succeed as locks expire or get released
@@ -312,7 +319,10 @@ async fn test_stress_bucket_operations() {
         .collect();
 
     let list_results = futures::future::join_all(list_handles).await;
-    let list_count = list_results.iter().filter(|r| r.as_ref().unwrap().is_ok()).count();
+    let list_count = list_results
+        .iter()
+        .filter(|r| r.as_ref().unwrap().is_ok())
+        .count();
 
     let duration = start.elapsed();
 

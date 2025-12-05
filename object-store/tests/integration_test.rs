@@ -2,7 +2,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use object_store::metadata::MetadataStore;
 use object_store::service::ObjectStoreService;
-use object_store_backends::{Backend, local::LocalBackend};
+use object_store_backends::{local::LocalBackend, Backend};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -17,11 +17,7 @@ async fn setup_test_service() -> (Arc<ObjectStoreService>, TempDir) {
 
     backend.init().await.unwrap();
 
-    let metadata = Arc::new(
-        MetadataStore::new(backend.clone())
-            .await
-            .unwrap(),
-    );
+    let metadata = Arc::new(MetadataStore::new(backend.clone()).await.unwrap());
 
     let service = Arc::new(ObjectStoreService::new(backend, metadata));
 
@@ -297,7 +293,10 @@ async fn test_head_object() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers().get("content-length").unwrap(), "13");
-    assert_eq!(response.headers().get("content-type").unwrap(), "text/plain");
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/plain"
+    );
 }
 
 #[tokio::test]
