@@ -1,5 +1,5 @@
 {
-  "name": "@your-org/object-storage-client",
+  "name": "object-storage-client",
   "version": "0.1.0",
   "description": "TypeScript client for Object Storage Service",
   "main": "dist/index.js",
@@ -20,7 +20,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/object-storage"
+    "url": "https://github.com/metorial/object-storage"
   },
   "files": [
     "dist"

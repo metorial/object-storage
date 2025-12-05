@@ -1,4 +1,4 @@
-module github.com/your-org/object-storage-client
+module github.com/metorial/object-storage/clients/go
 
 go 1.21
 

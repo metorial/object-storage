@@ -271,6 +271,57 @@ The service is organized into three main components:
 - **object-store-backends**: Storage backend implementations
 - **clients**: Client libraries for different languages
 
+## Client Libraries
+
+Client libraries are available for multiple languages:
+
+### Go
+
+```bash
+go get github.com/metorial/object-storage/clients/go
+```
+
+```go
+import objectstorage "github.com/metorial/object-storage/clients/go"
+
+client := objectstorage.NewClient("http://localhost:8080")
+bucket, err := client.CreateBucket("my-bucket")
+```
+
+See [clients/go/README.md](clients/go/README.md) for full documentation.
+
+### TypeScript/JavaScript
+
+```bash
+npm install @metorial/object-storage-client
+```
+
+```typescript
+import { ObjectStorageClient } from '@metorial/object-storage-client';
+
+const client = new ObjectStorageClient('http://localhost:8080');
+const bucket = await client.createBucket('my-bucket');
+```
+
+See [clients/typescript/README.md](clients/typescript/README.md) for full documentation.
+
+### Python
+
+```bash
+pip install object-storage-client
+```
+
+See [clients/python/README.md](clients/python/README.md) for full documentation.
+
+### Rust
+
+```toml
+[dependencies]
+object-storage-client = "0.1"
+```
+
+See [clients/rust/README.md](clients/rust/README.md) for full documentation.
+
 ## License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) file for details.
