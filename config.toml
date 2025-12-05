@@ -1,0 +1,29 @@
+[server]
+host = "127.0.0.1"
+port = 8080
+
+[backend]
+type = "local"
+root_path = "./data"
+physical_bucket = "object-store-data"
+
+# For S3 backend:
+# [backend]
+# type = "s3"
+# region = "us-east-1"
+# physical_bucket = "my-object-store-bucket"
+# endpoint = "http://localhost:9000"  # Optional, for MinIO or other S3-compatible services
+
+# For GCS backend:
+# [backend]
+# type = "gcs"
+# physical_bucket = "my-gcs-bucket"
+
+# For Azure backend:
+# [backend]
+# type = "azure"
+# account = "myaccount"
+# access_key = "myaccesskey"
+# physical_bucket = "mycontainer"
+
+# No database needed - metadata is stored in the object storage backend itself!

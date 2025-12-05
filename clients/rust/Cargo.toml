@@ -1,0 +1,25 @@
+[package]
+name = "object-store-client"
+version = "0.1.0"
+edition = "2021"
+authors = ["Object Storage Team"]
+license = "MIT"
+description = "Rust client for Object Storage Service"
+repository = "https://github.com/your-org/object-storage"
+keywords = ["object-storage", "s3", "client"]
+categories = ["api-bindings", "web-programming::http-client"]
+
+[workspace]
+
+[dependencies]
+reqwest = { version = "0.11", features = ["json", "multipart"] }
+tokio = { version = "1.35", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1.5"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockito = "1.2"
