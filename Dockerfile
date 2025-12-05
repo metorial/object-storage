@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.75-slim as builder
+FROM rust:1.91-slim AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -30,7 +30,7 @@ COPY object-store-backends ./object-store-backends
 RUN cargo build --release --bin object-store-service
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:bullseye-slim
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
