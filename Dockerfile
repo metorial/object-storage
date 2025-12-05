@@ -30,7 +30,7 @@ COPY object-store-backends ./object-store-backends
 RUN cargo build --release --bin object-store-service
 
 # Runtime stage
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
