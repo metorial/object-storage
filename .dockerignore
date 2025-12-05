@@ -35,5 +35,9 @@ Thumbs.db
 .env
 .env.local
 
+# Config files (should be provided at runtime)
+config.toml
+config.*.toml
+
 # Logs
 *.log

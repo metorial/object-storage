@@ -46,9 +46,6 @@ WORKDIR /app
 # Copy the binary from builder
 COPY --from=builder /app/target/release/object-store-service /app/object-store-service
 
-# Copy Docker-specific configuration file
-COPY config.toml /app/config.toml
-
 # Create data directory for local backend
 RUN mkdir -p /app/data
 
@@ -57,15 +54,16 @@ RUN chown -R appuser:appuser /app
 
 USER appuser
 
-# Volume for persistent data
+# Volumes for persistent data and configuration
 VOLUME /app/data
+VOLUME /app/config
 
-# Expose the port (matches default config port)
+# Expose the port (default is 8080, configurable via config or env vars)
 EXPOSE 8080
 
 # Set environment variables
 ENV RUST_LOG=info
-ENV CONFIG_PATH=/app/config.toml
+# CONFIG_PATH should be set at runtime or config provided via environment variables
 
 # Run the binary
 CMD ["/app/object-store-service"]
