@@ -1,14 +1,11 @@
 [workspace]
-members = [
-    "object-store",
-    "object-store-backends",
-]
+members = ["object-store", "object-store-backends"]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Object Storage Team"]
+authors = ["Metorial"]
 license = "MIT"
 
 [workspace.dependencies]

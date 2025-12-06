@@ -305,14 +305,6 @@ const bucket = await client.createBucket('my-bucket');
 
 See [clients/typescript/README.md](clients/typescript/README.md) for full documentation.
 
-### Python
-
-```bash
-pip install object-storage-client
-```
-
-See [clients/python/README.md](clients/python/README.md) for full documentation.
-
 ### Rust
 
 ```toml

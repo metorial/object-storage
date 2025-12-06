@@ -6,4 +6,7 @@ on:
 
 jobs:
   legal:
+    permissions:
+      pull-requests: write
+      contents: read
     uses: metorial/.github/.github/workflows/legal-boilerplate.yml@main
