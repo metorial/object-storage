@@ -1,4 +1,6 @@
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use object_store_backends::{Backend, BackendError};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -111,13 +113,23 @@ impl MetadataStore {
 
                 for obj in objects {
                     match self.backend.get_object(&obj.key).await {
-                        Ok(obj_data) => match serde_json::from_slice::<Bucket>(&obj_data.data) {
-                            Ok(bucket) => buckets.push(bucket),
-                            Err(e) => {
-                                warn!("Failed to parse bucket {}: {}", obj.key, e);
-                                errors += 1;
+                        Ok(mut obj_data) => {
+                            // Collect stream to bytes
+                            let mut data = Vec::new();
+                            while let Some(chunk) = obj_data.stream.next().await {
+                                if let Ok(bytes) = chunk {
+                                    data.extend_from_slice(&bytes);
+                                }
                             }
-                        },
+
+                            match serde_json::from_slice::<Bucket>(&data) {
+                                Ok(bucket) => buckets.push(bucket),
+                                Err(e) => {
+                                    warn!("Failed to parse bucket {}: {}", obj.key, e);
+                                    errors += 1;
+                                }
+                            }
+                        }
                         Err(e) => {
                             warn!("Failed to read bucket object {}: {:?}", obj.key, e);
                             errors += 1;
@@ -166,8 +178,15 @@ impl MetadataStore {
     async fn load_bucket_from_backend(&self, name: &str) -> ServiceResult<Option<Bucket>> {
         let key = Self::bucket_key(name);
         match self.backend.get_object(&key).await {
-            Ok(obj_data) => {
-                let bucket: Bucket = serde_json::from_slice(&obj_data.data)?;
+            Ok(mut obj_data) => {
+                // Collect stream to bytes
+                let mut data = Vec::new();
+                while let Some(chunk) = obj_data.stream.next().await {
+                    let chunk = chunk.map_err(|e| ServiceError::Internal(e.to_string()))?;
+                    data.extend_from_slice(&chunk);
+                }
+
+                let bucket: Bucket = serde_json::from_slice(&data)?;
                 Ok(Some(bucket))
             }
             Err(BackendError::NotFound(_)) => Ok(None),
@@ -179,10 +198,14 @@ impl MetadataStore {
         let key = Self::bucket_key(&bucket.name);
         let data = serde_json::to_vec(bucket)?;
 
+        // Convert Vec<u8> to stream
+        let stream: object_store_backends::ByteStream =
+            Box::pin(futures::stream::once(async move { Ok(Bytes::from(data)) }));
+
         self.backend
             .put_object(
                 &key,
-                data,
+                stream,
                 Some("application/json".to_string()),
                 HashMap::new(),
             )
@@ -305,8 +328,15 @@ impl MetadataStore {
         let expires_at = now + chrono::Duration::seconds(ttl_seconds);
 
         match self.backend.get_object(&lock_key).await {
-            Ok(obj_data) => {
-                let existing_lock: Lock = serde_json::from_slice(&obj_data.data)?;
+            Ok(mut obj_data) => {
+                // Collect stream to bytes
+                let mut data = Vec::new();
+                while let Some(chunk) = obj_data.stream.next().await {
+                    let chunk = chunk.map_err(|e| ServiceError::Internal(e.to_string()))?;
+                    data.extend_from_slice(&chunk);
+                }
+
+                let existing_lock: Lock = serde_json::from_slice(&data)?;
 
                 if existing_lock.expires_at > now {
                     debug!("Lock {} is held by {}", resource, existing_lock.owner);
@@ -330,10 +360,14 @@ impl MetadataStore {
         };
 
         let data = serde_json::to_vec(&lock)?;
+        // Convert Vec<u8> to stream
+        let stream: object_store_backends::ByteStream =
+            Box::pin(futures::stream::once(async move { Ok(Bytes::from(data)) }));
+
         self.backend
             .put_object(
                 &lock_key,
-                data,
+                stream,
                 Some("application/json".to_string()),
                 HashMap::new(),
             )
@@ -347,8 +381,15 @@ impl MetadataStore {
         let lock_key = format!("{}/{}", LOCKS_PREFIX, resource);
 
         match self.backend.get_object(&lock_key).await {
-            Ok(obj_data) => {
-                let existing_lock: Lock = serde_json::from_slice(&obj_data.data)?;
+            Ok(mut obj_data) => {
+                // Collect stream to bytes
+                let mut data = Vec::new();
+                while let Some(chunk) = obj_data.stream.next().await {
+                    let chunk = chunk.map_err(|e| ServiceError::Internal(e.to_string()))?;
+                    data.extend_from_slice(&chunk);
+                }
+
+                let existing_lock: Lock = serde_json::from_slice(&data)?;
                 if existing_lock.owner != owner {
                     return Err(ServiceError::LockAcquisition(format!(
                         "Cannot release lock owned by {}",
@@ -376,8 +417,16 @@ impl MetadataStore {
             Ok(objects) => {
                 for obj in objects {
                     // Try to read lock and check expiration
-                    if let Ok(obj_data) = self.backend.get_object(&obj.key).await {
-                        if let Ok(lock) = serde_json::from_slice::<Lock>(&obj_data.data) {
+                    if let Ok(mut obj_data) = self.backend.get_object(&obj.key).await {
+                        // Collect stream to bytes
+                        let mut data = Vec::new();
+                        while let Some(chunk) = obj_data.stream.next().await {
+                            if let Ok(bytes) = chunk {
+                                data.extend_from_slice(&bytes);
+                            }
+                        }
+
+                        if let Ok(lock) = serde_json::from_slice::<Lock>(&data) {
                             if lock.expires_at < now {
                                 // Lock expired, delete it
                                 if self.backend.delete_object(&obj.key).await.is_ok() {

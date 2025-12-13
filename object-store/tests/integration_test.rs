@@ -1,5 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use bytes::Bytes;
+use futures::stream;
 use object_store::metadata::MetadataStore;
 use object_store::service::ObjectStoreService;
 use object_store_backends::{local::LocalBackend, Backend};
@@ -141,11 +143,14 @@ async fn test_delete_object() {
 
     // Create bucket and put object
     service.create_bucket("test-bucket").await.unwrap();
+    let data = b"Hello".to_vec();
+    let stream: object_store_backends::ByteStream =
+        Box::pin(stream::once(async move { Ok(Bytes::from(data)) }));
     service
         .put_object(
             "test-bucket",
             "test.txt",
-            b"Hello".to_vec(),
+            stream,
             Some("text/plain".to_string()),
             Default::default(),
         )
@@ -188,31 +193,31 @@ async fn test_list_objects() {
 
     // Create bucket and put multiple objects
     service.create_bucket("test-bucket").await.unwrap();
+
+    let data1 = b"Data1".to_vec();
+    let stream1: object_store_backends::ByteStream =
+        Box::pin(stream::once(async move { Ok(Bytes::from(data1)) }));
     service
-        .put_object(
-            "test-bucket",
-            "file1.txt",
-            b"Data1".to_vec(),
-            None,
-            Default::default(),
-        )
+        .put_object("test-bucket", "file1.txt", stream1, None, Default::default())
         .await
         .unwrap();
+
+    let data2 = b"Data2".to_vec();
+    let stream2: object_store_backends::ByteStream =
+        Box::pin(stream::once(async move { Ok(Bytes::from(data2)) }));
     service
-        .put_object(
-            "test-bucket",
-            "file2.txt",
-            b"Data2".to_vec(),
-            None,
-            Default::default(),
-        )
+        .put_object("test-bucket", "file2.txt", stream2, None, Default::default())
         .await
         .unwrap();
+
+    let data3 = b"Data3".to_vec();
+    let stream3: object_store_backends::ByteStream =
+        Box::pin(stream::once(async move { Ok(Bytes::from(data3)) }));
     service
         .put_object(
             "test-bucket",
             "subdir/file3.txt",
-            b"Data3".to_vec(),
+            stream3,
             None,
             Default::default(),
         )
@@ -268,11 +273,14 @@ async fn test_head_object() {
 
     // Create bucket and put object
     service.create_bucket("test-bucket").await.unwrap();
+    let data = b"Hello, World!".to_vec();
+    let stream: object_store_backends::ByteStream =
+        Box::pin(stream::once(async move { Ok(Bytes::from(data)) }));
     service
         .put_object(
             "test-bucket",
             "test.txt",
-            b"Hello, World!".to_vec(),
+            stream,
             Some("text/plain".to_string()),
             Default::default(),
         )
@@ -349,14 +357,12 @@ async fn test_path_traversal_protection() {
 
     service.create_bucket("test-bucket").await.unwrap();
 
+    let data = b"malicious".to_vec();
+    let stream: object_store_backends::ByteStream =
+        Box::pin(stream::once(async move { Ok(Bytes::from(data)) }));
+
     let result = service
-        .put_object(
-            "test-bucket",
-            "../etc/passwd",
-            b"malicious".to_vec(),
-            None,
-            Default::default(),
-        )
+        .put_object("test-bucket", "../etc/passwd", stream, None, Default::default())
         .await;
 
     assert!(result.is_err());

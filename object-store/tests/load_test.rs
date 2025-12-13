@@ -1,3 +1,5 @@
+use bytes::Bytes;
+use futures::{stream, StreamExt};
 use object_store::metadata::MetadataStore;
 use object_store::service::ObjectStoreService;
 use object_store_backends::{local::LocalBackend, Backend};
@@ -39,12 +41,14 @@ async fn test_concurrent_writes() {
             tokio::spawn(async move {
                 let key = format!("file-{}.txt", i);
                 let data = format!("Data for file {}", i).into_bytes();
+                let stream: object_store_backends::ByteStream =
+                    Box::pin(stream::once(async move { Ok(Bytes::from(data)) }));
 
                 service
                     .put_object(
                         "load-test-bucket",
                         &key,
-                        data,
+                        stream,
                         Some("text/plain".to_string()),
                         Default::default(),
                     )
@@ -84,11 +88,13 @@ async fn test_concurrent_reads() {
     for i in 0..num_files {
         let key = format!("file-{}.txt", i);
         let data = format!("Data for file {}", i).into_bytes();
+        let stream: object_store_backends::ByteStream =
+            Box::pin(stream::once(async move { Ok(Bytes::from(data)) }));
         service
             .put_object(
                 "load-test-bucket",
                 &key,
-                data,
+                stream,
                 Some("text/plain".to_string()),
                 Default::default(),
             )
@@ -150,11 +156,13 @@ async fn test_mixed_operations() {
                         // Write
                         let key = format!("file-{}.txt", i);
                         let data = format!("Data {}", i).into_bytes();
+                        let stream: object_store_backends::ByteStream =
+                            Box::pin(stream::once(async move { Ok(Bytes::from(data)) }));
                         service
                             .put_object(
                                 "load-test-bucket",
                                 &key,
-                                data,
+                                stream,
                                 Some("text/plain".to_string()),
                                 Default::default(),
                             )
@@ -227,11 +235,14 @@ async fn test_large_file_handling() {
         let key = format!("large-file-{}.bin", i);
 
         // Write
+        let expected_size = data.len();
+        let stream: object_store_backends::ByteStream =
+            Box::pin(stream::once(async move { Ok(Bytes::from(data)) }));
         service
             .put_object(
                 "load-test-bucket",
                 &key,
-                data.clone(),
+                stream,
                 Some("application/octet-stream".to_string()),
                 Default::default(),
             )
@@ -242,10 +253,17 @@ async fn test_large_file_handling() {
 
         // Read
         let read_start = Instant::now();
-        let retrieved = service.get_object("load-test-bucket", &key).await.unwrap();
+        let mut retrieved = service.get_object("load-test-bucket", &key).await.unwrap();
         let read_duration = read_start.elapsed();
 
-        assert_eq!(retrieved.data.len(), *size);
+        // Collect stream to verify size
+        let mut collected_data = Vec::new();
+        while let Some(chunk) = retrieved.stream.next().await {
+            let chunk = chunk.unwrap();
+            collected_data.extend_from_slice(&chunk);
+        }
+
+        assert_eq!(collected_data.len(), expected_size);
 
         println!(
             "✓ {:.2} MB file: write {:?}, read {:?}",
