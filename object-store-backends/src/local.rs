@@ -139,9 +139,7 @@ impl Backend for LocalBackend {
 
         // Convert file to stream
         let stream: ByteStream =
-            Box::pin(ReaderStream::new(file).map(|result| {
-                result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-            }));
+            Box::pin(ReaderStream::new(file).map(|result| result.map_err(std::io::Error::other)));
 
         Ok(ObjectData { metadata, stream })
     }

@@ -134,7 +134,7 @@ pub async fn put_object(
 
     let stream: object_store_backends::ByteStream = Box::pin(
         body.into_data_stream()
-            .map(|result| result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))),
+            .map(|result| result.map_err(std::io::Error::other)),
     );
 
     let obj_metadata = service

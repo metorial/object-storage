@@ -198,9 +198,10 @@ impl Backend for S3Backend {
 
                 // Convert AWS ByteStream to our ByteStream via AsyncRead
                 let async_read = output.body.into_async_read();
-                let stream: ByteStream = Box::pin(ReaderStream::new(async_read).map(|result| {
-                    result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-                }));
+                let stream: ByteStream = Box::pin(
+                    ReaderStream::new(async_read)
+                        .map(|result| result.map_err(std::io::Error::other)),
+                );
 
                 Ok(ObjectData {
                     metadata: Self::s3_metadata_to_object_metadata(

@@ -198,7 +198,13 @@ async fn test_list_objects() {
     let stream1: object_store_backends::ByteStream =
         Box::pin(stream::once(async move { Ok(Bytes::from(data1)) }));
     service
-        .put_object("test-bucket", "file1.txt", stream1, None, Default::default())
+        .put_object(
+            "test-bucket",
+            "file1.txt",
+            stream1,
+            None,
+            Default::default(),
+        )
         .await
         .unwrap();
 
@@ -206,7 +212,13 @@ async fn test_list_objects() {
     let stream2: object_store_backends::ByteStream =
         Box::pin(stream::once(async move { Ok(Bytes::from(data2)) }));
     service
-        .put_object("test-bucket", "file2.txt", stream2, None, Default::default())
+        .put_object(
+            "test-bucket",
+            "file2.txt",
+            stream2,
+            None,
+            Default::default(),
+        )
         .await
         .unwrap();
 
@@ -362,7 +374,13 @@ async fn test_path_traversal_protection() {
         Box::pin(stream::once(async move { Ok(Bytes::from(data)) }));
 
     let result = service
-        .put_object("test-bucket", "../etc/passwd", stream, None, Default::default())
+        .put_object(
+            "test-bucket",
+            "../etc/passwd",
+            stream,
+            None,
+            Default::default(),
+        )
         .await;
 
     assert!(result.is_err());
