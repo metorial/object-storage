@@ -2,13 +2,15 @@ use async_trait::async_trait;
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::Region;
-use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::primitives::ByteStream as AwsByteStream;
 use aws_sdk_s3::Client;
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use std::collections::HashMap;
+use tokio_util::io::ReaderStream;
 use tracing::{debug, info, warn};
 
-use crate::backend::{Backend, ObjectData, ObjectMetadata};
+use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata};
 use crate::error::{BackendError, BackendResult};
 
 pub struct S3Backend {
@@ -54,13 +56,6 @@ impl S3Backend {
             client,
             bucket_name,
         })
-    }
-
-    fn calculate_etag(data: &[u8]) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        hex::encode(hasher.finalize())
     }
 
     fn s3_metadata_to_object_metadata(
@@ -114,14 +109,29 @@ impl Backend for S3Backend {
     async fn put_object(
         &self,
         key: &str,
-        data: Vec<u8>,
+        mut stream: ByteStream,
         content_type: Option<String>,
         custom_metadata: HashMap<String, String>,
     ) -> BackendResult<ObjectMetadata> {
-        let size = data.len();
-        let etag = Self::calculate_etag(&data);
+        use sha2::{Digest, Sha256};
 
-        let body = ByteStream::from(data);
+        // Collect stream into bytes while computing hash
+        let mut hasher = Sha256::new();
+        let mut data = Vec::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result
+                .map_err(|e| BackendError::Provider(format!("Failed to read stream: {}", e)))?;
+
+            hasher.update(&chunk);
+            data.extend_from_slice(&chunk);
+        }
+
+        let size = data.len();
+        let etag = hex::encode(hasher.finalize());
+
+        // Convert to AWS ByteStream
+        let body = AwsByteStream::from(data);
 
         let mut request = self
             .client
@@ -172,8 +182,9 @@ impl Backend for S3Backend {
             Ok(output) => {
                 let content_type = output.content_type().map(|s| s.to_string());
                 let etag = output.e_tag().map(|s| s.to_string());
+                let size = output.content_length().unwrap_or(0) as u64;
 
-                let metadata = output
+                let metadata_map = output
                     .metadata()
                     .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                     .unwrap_or_default();
@@ -183,19 +194,13 @@ impl Backend for S3Backend {
                     .and_then(|dt| DateTime::parse_from_rfc3339(&dt.to_string()).ok())
                     .map(|dt| dt.with_timezone(&Utc));
 
-                let data = output
-                    .body
-                    .collect()
-                    .await
-                    .map_err(|e| {
-                        BackendError::Provider(format!("Failed to read object body: {}", e))
-                    })?
-                    .into_bytes()
-                    .to_vec();
-
-                let size = data.len();
-
                 debug!("Retrieved object from S3: {} ({} bytes)", key, size);
+
+                // Convert AWS ByteStream to our ByteStream via AsyncRead
+                let async_read = output.body.into_async_read();
+                let stream: ByteStream = Box::pin(ReaderStream::new(async_read).map(|result| {
+                    result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                }));
 
                 Ok(ObjectData {
                     metadata: Self::s3_metadata_to_object_metadata(
@@ -204,9 +209,9 @@ impl Backend for S3Backend {
                         last_modified,
                         etag,
                         content_type,
-                        metadata,
+                        metadata_map,
                     ),
-                    data,
+                    stream,
                 })
             }
             Err(e) => {
