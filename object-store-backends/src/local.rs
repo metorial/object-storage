@@ -1,12 +1,15 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio_util::io::ReaderStream;
 use tracing::{debug, info};
 
-use crate::backend::{compute_etag, Backend, ObjectData, ObjectMetadata};
+use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata};
 use crate::error::{BackendError, BackendResult};
 
 pub struct LocalBackend {
@@ -73,11 +76,11 @@ impl Backend for LocalBackend {
     async fn put_object(
         &self,
         key: &str,
-        data: Vec<u8>,
+        mut stream: ByteStream,
         content_type: Option<String>,
         custom_metadata: HashMap<String, String>,
     ) -> BackendResult<ObjectMetadata> {
-        debug!("Putting object: {} ({} bytes)", key, data.len());
+        debug!("Putting object: {}", key);
 
         let object_path = self.get_full_path(key)?;
 
@@ -86,21 +89,39 @@ impl Backend for LocalBackend {
         }
 
         let mut file = fs::File::create(&object_path).await?;
-        file.write_all(&data).await?;
+        let mut hasher = Sha256::new();
+        let mut total_size = 0u64;
+
+        // Stream data to file while computing hash
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result
+                .map_err(|e| BackendError::Provider(format!("Failed to read stream: {}", e)))?;
+
+            hasher.update(&chunk);
+            total_size += chunk.len() as u64;
+
+            file.write_all(&chunk).await?;
+        }
+
         file.sync_all().await?;
+
+        let etag = hex::encode(hasher.finalize());
 
         let metadata = ObjectMetadata {
             key: key.to_string(),
-            size: data.len() as u64,
+            size: total_size,
             content_type,
-            etag: compute_etag(&data),
+            etag: etag.clone(),
             last_modified: Utc::now(),
             custom_metadata,
         };
 
         self.write_metadata(&metadata).await?;
 
-        info!("Object stored: {} (etag: {})", key, metadata.etag);
+        info!(
+            "Object stored: {} (etag: {}, {} bytes)",
+            key, etag, total_size
+        );
         Ok(metadata)
     }
 
@@ -113,10 +134,14 @@ impl Backend for LocalBackend {
             return Err(BackendError::NotFound(key.to_string()));
         }
 
-        let data = fs::read(&object_path).await?;
+        let file = fs::File::open(&object_path).await?;
         let metadata = self.read_metadata(key).await?;
 
-        Ok(ObjectData { metadata, data })
+        // Convert file to stream
+        let stream: ByteStream =
+            Box::pin(ReaderStream::new(file).map(|result| result.map_err(std::io::Error::other)));
+
+        Ok(ObjectData { metadata, stream })
     }
 
     async fn head_object(&self, key: &str) -> BackendResult<ObjectMetadata> {
@@ -245,20 +270,28 @@ impl LocalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_local_backend_put_get() {
+        use futures::stream;
+
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalBackend::new(temp_dir.path().to_path_buf(), "test-bucket".to_string());
 
         backend.init().await.unwrap();
 
         let data = b"Hello, World!".to_vec();
+        let data_clone = data.clone();
+
+        // Create a stream from the data
+        let stream: ByteStream = Box::pin(stream::iter(vec![Ok(Bytes::from(data.clone()))]));
+
         let metadata = backend
             .put_object(
                 "test.txt",
-                data.clone(),
+                stream,
                 Some("text/plain".to_string()),
                 HashMap::new(),
             )
@@ -268,22 +301,32 @@ mod tests {
         assert_eq!(metadata.key, "test.txt");
         assert_eq!(metadata.size, 13);
 
-        let obj = backend.get_object("test.txt").await.unwrap();
-        assert_eq!(obj.data, data);
+        let mut obj = backend.get_object("test.txt").await.unwrap();
+
+        // Collect stream back to Vec<u8>
+        let mut collected = Vec::new();
+        while let Some(chunk) = obj.stream.next().await {
+            collected.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(collected, data_clone);
     }
 
     #[tokio::test]
     async fn test_local_backend_delete() {
+        use futures::stream;
+
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalBackend::new(temp_dir.path().to_path_buf(), "test-bucket".to_string());
 
         backend.init().await.unwrap();
 
         let data = b"Hello, World!".to_vec();
+        let stream: ByteStream = Box::pin(stream::iter(vec![Ok(Bytes::from(data))]));
+
         backend
             .put_object(
                 "test.txt",
-                data,
+                stream,
                 Some("text/plain".to_string()),
                 HashMap::new(),
             )
@@ -298,13 +341,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_path_traversal_prevention() {
+        use futures::stream;
+
         let temp_dir = TempDir::new().unwrap();
         let backend = LocalBackend::new(temp_dir.path().to_path_buf(), "test-bucket".to_string());
 
         backend.init().await.unwrap();
 
+        let stream: ByteStream = Box::pin(stream::iter(vec![Ok(Bytes::from(vec![1, 2, 3]))]));
+
         let result = backend
-            .put_object("../etc/passwd", vec![1, 2, 3], None, HashMap::new())
+            .put_object("../etc/passwd", stream, None, HashMap::new())
             .await;
         assert!(matches!(result, Err(BackendError::InvalidPath(_))));
     }

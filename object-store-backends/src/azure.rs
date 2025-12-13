@@ -2,12 +2,14 @@ use async_trait::async_trait;
 use azure_core::auth::Secret;
 use azure_storage::prelude::*;
 use azure_storage_blobs::prelude::*;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
-use crate::backend::{Backend, ObjectData, ObjectMetadata};
+use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata};
 use crate::error::{BackendError, BackendResult};
 
 pub struct AzureBackend {
@@ -131,25 +133,38 @@ impl Backend for AzureBackend {
     async fn put_object(
         &self,
         key: &str,
-        data: Vec<u8>,
+        mut stream: ByteStream,
         content_type: Option<String>,
         custom_metadata: HashMap<String, String>,
     ) -> BackendResult<ObjectMetadata> {
-        let size = data.len();
-
         let blob_client = self.client.blob_client(key);
 
-        let mut request = blob_client.put_block_blob(data.clone());
+        // Collect stream into bytes while computing hash
+        let mut hasher = Sha256::new();
+        let mut data = Vec::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result
+                .map_err(|e| BackendError::Provider(format!("Failed to read stream: {}", e)))?;
+
+            hasher.update(&chunk);
+            data.extend_from_slice(&chunk);
+        }
+
+        let size = data.len();
+        let etag = hex::encode(hasher.finalize());
+
+        let mut request = blob_client.put_block_blob(data);
 
         if let Some(ct) = content_type.as_ref() {
             request = request.content_type(ct.clone());
         }
 
-        let mut metadata = azure_core::request_options::Metadata::new();
+        let mut metadata_obj = azure_core::request_options::Metadata::new();
         for (k, v) in custom_metadata.iter() {
-            metadata.insert(k.clone(), v.clone());
+            metadata_obj.insert(k.clone(), v.clone());
         }
-        request = request.metadata(metadata);
+        request = request.metadata(metadata_obj);
 
         match request.await {
             Ok(_) => {
@@ -159,7 +174,7 @@ impl Backend for AzureBackend {
                     size: size as u64,
                     content_type,
                     last_modified: Utc::now(),
-                    etag: Self::calculate_etag(&data),
+                    etag,
                     custom_metadata,
                 })
             }
@@ -181,20 +196,24 @@ impl Backend for AzureBackend {
                 let size = data.len();
                 debug!("Retrieved blob from Azure: {} ({} bytes)", key, size);
 
-                match self.head_object(key).await {
-                    Ok(metadata) => Ok(ObjectData { metadata, data }),
-                    Err(_) => Ok(ObjectData {
-                        metadata: ObjectMetadata {
-                            key: key.to_string(),
-                            size: size as u64,
-                            content_type: None,
-                            last_modified: Utc::now(),
-                            etag: Self::calculate_etag(&data),
-                            custom_metadata: HashMap::new(),
-                        },
-                        data,
-                    }),
-                }
+                // Get metadata
+                let metadata = match self.head_object(key).await {
+                    Ok(meta) => meta,
+                    Err(_) => ObjectMetadata {
+                        key: key.to_string(),
+                        size: size as u64,
+                        content_type: None,
+                        last_modified: Utc::now(),
+                        etag: Self::calculate_etag(&data),
+                        custom_metadata: HashMap::new(),
+                    },
+                };
+
+                // Convert data to stream
+                let stream: ByteStream =
+                    Box::pin(futures::stream::once(async move { Ok(Bytes::from(data)) }));
+
+                Ok(ObjectData { metadata, stream })
             }
             Err(e) => {
                 let error_msg = format!("{:?}", e);

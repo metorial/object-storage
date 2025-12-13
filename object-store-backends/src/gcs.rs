@@ -1,15 +1,18 @@
 use async_trait::async_trait;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use google_cloud_storage::client::{Client, ClientConfig};
 use google_cloud_storage::http::objects::delete::DeleteObjectRequest;
 use google_cloud_storage::http::objects::download::Range;
 use google_cloud_storage::http::objects::get::GetObjectRequest;
 use google_cloud_storage::http::objects::list::ListObjectsRequest;
 use google_cloud_storage::http::objects::upload::{Media, UploadObjectRequest, UploadType};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
-use crate::backend::{Backend, ObjectData, ObjectMetadata};
+use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata};
 use crate::error::{BackendError, BackendResult};
 
 pub struct GcsBackend {
@@ -118,12 +121,25 @@ impl Backend for GcsBackend {
     async fn put_object(
         &self,
         key: &str,
-        data: Vec<u8>,
+        mut stream: ByteStream,
         content_type: Option<String>,
         custom_metadata: HashMap<String, String>,
     ) -> BackendResult<ObjectMetadata> {
-        let size = data.len();
         let key_owned = key.to_string();
+
+        // Collect stream into bytes while computing hash
+        let mut hasher = Sha256::new();
+        let mut data = Vec::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result
+                .map_err(|e| BackendError::Provider(format!("Failed to read stream: {}", e)))?;
+
+            hasher.update(&chunk);
+            data.extend_from_slice(&chunk);
+        }
+
+        let size = data.len();
 
         let upload_type = UploadType::Simple(Media::new(key_owned.clone()));
         let request = UploadObjectRequest {
@@ -173,20 +189,24 @@ impl Backend for GcsBackend {
                 let size = data.len();
                 debug!("Retrieved object from GCS: {} ({} bytes)", key, size);
 
-                match self.head_object(key).await {
-                    Ok(metadata) => Ok(ObjectData { metadata, data }),
-                    Err(_) => Ok(ObjectData {
-                        metadata: ObjectMetadata {
-                            key: key.to_string(),
-                            size: size as u64,
-                            content_type: None,
-                            last_modified: Utc::now(),
-                            etag: Self::calculate_etag(&data),
-                            custom_metadata: HashMap::new(),
-                        },
-                        data,
-                    }),
-                }
+                // Get metadata
+                let metadata = match self.head_object(key).await {
+                    Ok(meta) => meta,
+                    Err(_) => ObjectMetadata {
+                        key: key.to_string(),
+                        size: size as u64,
+                        content_type: None,
+                        last_modified: Utc::now(),
+                        etag: Self::calculate_etag(&data),
+                        custom_metadata: HashMap::new(),
+                    },
+                };
+
+                // Convert data to stream
+                let stream: ByteStream =
+                    Box::pin(futures::stream::once(async move { Ok(Bytes::from(data)) }));
+
+                Ok(ObjectData { metadata, stream })
             }
             Err(e) => {
                 let error_msg = format!("{:?}", e);

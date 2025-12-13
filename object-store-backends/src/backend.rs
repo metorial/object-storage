@@ -1,9 +1,14 @@
 use async_trait::async_trait;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::pin::Pin;
 
 use crate::error::BackendResult;
+
+pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectMetadata {
@@ -15,10 +20,9 @@ pub struct ObjectMetadata {
     pub custom_metadata: HashMap<String, String>,
 }
 
-#[derive(Debug)]
 pub struct ObjectData {
     pub metadata: ObjectMetadata,
-    pub data: Vec<u8>,
+    pub stream: ByteStream,
 }
 
 #[async_trait]
@@ -28,7 +32,7 @@ pub trait Backend: Send + Sync {
     async fn put_object(
         &self,
         key: &str,
-        data: Vec<u8>,
+        stream: ByteStream,
         content_type: Option<String>,
         metadata: HashMap<String, String>,
     ) -> BackendResult<ObjectMetadata>;

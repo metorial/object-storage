@@ -1,4 +1,5 @@
-use object_store_backends::{Backend, ObjectData, ObjectMetadata};
+use bytes::Bytes;
+use object_store_backends::{Backend, ByteStream, ObjectData, ObjectMetadata};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -26,8 +27,12 @@ impl ObjectStoreService {
         let bucket = self.metadata.create_bucket(name).await?;
 
         let bucket_marker = format!("{}/.bucket", name);
+
+        // Create empty stream for bucket marker
+        let stream: ByteStream = Box::pin(futures::stream::once(async { Ok(Bytes::new()) }));
+
         self.backend
-            .put_object(&bucket_marker, vec![], None, HashMap::new())
+            .put_object(&bucket_marker, stream, None, HashMap::new())
             .await?;
 
         info!("Created bucket: {}", name);
@@ -65,7 +70,7 @@ impl ObjectStoreService {
         &self,
         bucket: &str,
         key: &str,
-        data: Vec<u8>,
+        stream: ByteStream,
         content_type: Option<String>,
         metadata: HashMap<String, String>,
     ) -> ServiceResult<ObjectMetadata> {
@@ -77,7 +82,7 @@ impl ObjectStoreService {
 
         let obj_metadata = self
             .backend
-            .put_object(&full_key, data, content_type, metadata)
+            .put_object(&full_key, stream, content_type, metadata)
             .await?;
 
         debug!("Put object: {}/{}", bucket, key);

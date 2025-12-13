@@ -26,6 +26,8 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 mime_guess = { workspace = true }
+futures = "0.3"
+bytes = "1.5"
 
 # Configuration
 config = "0.14"

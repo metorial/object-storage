@@ -1,8 +1,9 @@
-use axum::body::Bytes;
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -109,7 +110,7 @@ pub async fn put_object(
     State(service): State<SharedService>,
     Path((bucket, key)): Path<(String, String)>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> ServiceResult<Json<ObjectMetadataResponse>> {
     // Extract content type from headers
     let content_type = headers
@@ -123,16 +124,21 @@ pub async fn put_object(
 
     // Extract custom metadata from headers (x-amz-meta-* pattern)
     let mut metadata = HashMap::new();
-    for (key, value) in headers.iter() {
-        if let Some(meta_key) = key.as_str().strip_prefix("x-object-meta-") {
+    for (header_key, value) in headers.iter() {
+        if let Some(meta_key) = header_key.as_str().strip_prefix("x-object-meta-") {
             if let Ok(meta_value) = value.to_str() {
                 metadata.insert(meta_key.to_string(), meta_value.to_string());
             }
         }
     }
 
+    let stream: object_store_backends::ByteStream = Box::pin(
+        body.into_data_stream()
+            .map(|result| result.map_err(std::io::Error::other)),
+    );
+
     let obj_metadata = service
-        .put_object(&bucket, &key, body.to_vec(), content_type, metadata)
+        .put_object(&bucket, &key, stream, content_type, metadata)
         .await?;
 
     Ok(Json(obj_metadata.into()))
@@ -174,14 +180,16 @@ pub async fn get_object(
     headers.insert(
         "content-length",
         obj_data
-            .data
-            .len()
+            .metadata
+            .size
             .to_string()
             .parse()
             .unwrap_or_else(|_| "0".parse().unwrap()),
     );
 
-    Ok((headers, obj_data.data).into_response())
+    let body = Body::from_stream(obj_data.stream);
+
+    Ok((headers, body).into_response())
 }
 
 pub async fn head_object(
