@@ -51,6 +51,17 @@ pub struct ListObjectsQuery {
     pub max_keys: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct GetPublicUrlQuery {
+    pub expiration_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublicUrlResponse {
+    pub url: String,
+    pub expires_in: u64,
+}
+
 impl From<Bucket> for BucketResponse {
     fn from(bucket: Bucket) -> Self {
         Self {
@@ -257,4 +268,22 @@ pub async fn list_objects(
     };
 
     Ok(Json(response))
+}
+
+pub async fn get_public_url(
+    State(service): State<SharedService>,
+    Path((bucket, key)): Path<(String, String)>,
+    Query(params): Query<GetPublicUrlQuery>,
+) -> ServiceResult<Json<PublicUrlResponse>> {
+    // Default expiration is 1 hour (3600 seconds)
+    let expiration_secs = params.expiration_secs.unwrap_or(3600);
+
+    let url = service
+        .get_public_url(&bucket, &key, expiration_secs)
+        .await?;
+
+    Ok(Json(PublicUrlResponse {
+        url,
+        expires_in: expiration_secs,
+    }))
 }

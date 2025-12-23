@@ -178,6 +178,30 @@ impl ObjectStoreService {
     pub fn metadata(&self) -> Arc<MetadataStore> {
         self.metadata.clone()
     }
+
+    pub async fn get_public_url(
+        &self,
+        bucket: &str,
+        key: &str,
+        expiration_secs: u64,
+    ) -> ServiceResult<String> {
+        self.metadata.get_bucket(bucket).await?;
+
+        validate_object_key(key)?;
+
+        let full_key = format!("{}/{}", bucket, key);
+
+        let url = self
+            .backend
+            .get_public_url(&full_key, expiration_secs)
+            .await?;
+
+        info!(
+            "Generated public URL for object: {}/{} (expires in {} seconds)",
+            bucket, key, expiration_secs
+        );
+        Ok(url)
+    }
 }
 
 fn validate_object_key(key: &str) -> ServiceResult<()> {

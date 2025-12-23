@@ -21,6 +21,7 @@ pub fn create_router(service: Arc<ObjectStoreService>) -> Router {
         .route("/buckets/:bucket/objects/*key", head(head_object))
         .route("/buckets/:bucket/objects/*key", delete(delete_object))
         .route("/buckets/:bucket/objects", get(list_objects))
+        .route("/buckets/:bucket/public-url/*key", get(get_public_url))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
