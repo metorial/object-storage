@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosError } from 'axios';
+import axios, { AxiosError, AxiosInstance } from 'axios';
 
 export class ObjectStorageError extends Error {
   constructor(
@@ -39,6 +39,11 @@ interface ListBucketsResponse {
 
 interface ListObjectsResponse {
   objects: ObjectMetadata[];
+}
+
+export interface PublicURLResponse {
+  url: string;
+  expires_in: number;
 }
 
 export class ObjectStorageClient {
@@ -198,6 +203,28 @@ export class ObjectStorageClient {
         { params }
       );
       return response.data.objects;
+    } catch (error) {
+      this.handleError(error as AxiosError);
+    }
+  }
+
+  async getPublicURL(
+    bucket: string,
+    key: string,
+    expirationSecs?: number
+  ): Promise<PublicURLResponse> {
+    try {
+      const params: Record<string, number> = {};
+
+      if (expirationSecs !== undefined) {
+        params.expiration_secs = expirationSecs;
+      }
+
+      const response = await this.client.get<PublicURLResponse>(
+        `/buckets/${bucket}/public-url/${key}`,
+        { params }
+      );
+      return response.data;
     } catch (error) {
       this.handleError(error as AxiosError);
     }

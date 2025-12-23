@@ -47,6 +47,11 @@ type listObjectsResponse struct {
 	Objects []ObjectMetadata `json:"objects"`
 }
 
+type PublicURLResponse struct {
+	URL       string `json:"url"`
+	ExpiresIn uint64 `json:"expires_in"`
+}
+
 type Error struct {
 	StatusCode int
 	Message    string
@@ -342,4 +347,40 @@ func (c *Client) ListObjects(bucket string, prefix *string, maxKeys *int) ([]Obj
 	}
 
 	return result.Objects, nil
+}
+
+func (c *Client) GetPublicURL(bucket, key string, expirationSecs *uint64) (*PublicURLResponse, error) {
+	urlPath := fmt.Sprintf("%s/buckets/%s/public-url/%s", c.baseURL, bucket, key)
+
+	if expirationSecs != nil {
+		params := url.Values{}
+		params.Add("expiration_secs", strconv.FormatUint(*expirationSecs, 10))
+		urlPath += "?" + params.Encode()
+	}
+
+	req, err := http.NewRequest("GET", urlPath, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, &Error{
+			StatusCode: resp.StatusCode,
+			Message:    string(bodyBytes),
+		}
+	}
+
+	var result PublicURLResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
 }

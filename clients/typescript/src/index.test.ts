@@ -179,4 +179,34 @@ describe('ObjectStorageClient', () => {
       expect(objects).toHaveLength(0);
     });
   });
+
+  describe('getPublicURL', () => {
+    it('should get public URL with custom expiration', async () => {
+      mock.onGet('/buckets/test-bucket/public-url/test-key').reply(200, {
+        url: 'https://example.com/signed-url?signature=abc123',
+        expires_in: 7200,
+      });
+
+      const response = await client.getPublicURL('test-bucket', 'test-key', 7200);
+      expect(response.url).toBe('https://example.com/signed-url?signature=abc123');
+      expect(response.expires_in).toBe(7200);
+    });
+
+    it('should get public URL with default expiration', async () => {
+      mock.onGet('/buckets/test-bucket/public-url/test-key').reply(200, {
+        url: 'https://example.com/signed-url?signature=xyz789',
+        expires_in: 3600,
+      });
+
+      const response = await client.getPublicURL('test-bucket', 'test-key');
+      expect(response.url).toBe('https://example.com/signed-url?signature=xyz789');
+      expect(response.expires_in).toBe(3600);
+    });
+
+    it('should handle not found error', async () => {
+      mock.onGet('/buckets/test-bucket/public-url/test-key').reply(404, 'Object not found');
+
+      await expect(client.getPublicURL('test-bucket', 'test-key')).rejects.toThrow('Object not found');
+    });
+  });
 });
