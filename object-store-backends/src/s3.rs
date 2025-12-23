@@ -2,11 +2,13 @@ use async_trait::async_trait;
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::Region;
+use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream as AwsByteStream;
 use aws_sdk_s3::Client;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, warn};
 
@@ -365,5 +367,36 @@ impl Backend for S3Backend {
                 }
             }
         }
+    }
+
+    async fn get_public_url(&self, key: &str, expiration_secs: u64) -> BackendResult<String> {
+        let presigning_config = PresigningConfig::expires_in(Duration::from_secs(expiration_secs))
+            .map_err(|e| {
+                BackendError::Provider(format!("Failed to create presigning config: {}", e))
+            })?;
+
+        let presigned_request = self
+            .client
+            .get_object()
+            .bucket(&self.bucket_name)
+            .key(key)
+            .presigned(presigning_config)
+            .await
+            .map_err(|e| {
+                warn!(
+                    "Failed to generate presigned URL for S3 object: {}: {:?}",
+                    key, e
+                );
+                BackendError::Provider(format!(
+                    "Failed to generate presigned URL for '{}': {}",
+                    key, e
+                ))
+            })?;
+
+        debug!(
+            "Generated presigned URL for S3 object: {} (expires in {} seconds)",
+            key, expiration_secs
+        );
+        Ok(presigned_request.uri().to_string())
     }
 }

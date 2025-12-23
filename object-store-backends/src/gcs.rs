@@ -337,4 +337,43 @@ impl Backend for GcsBackend {
             }
         }
     }
+
+    async fn get_public_url(&self, key: &str, expiration_secs: u64) -> BackendResult<String> {
+        let expiration = std::time::Duration::from_secs(expiration_secs);
+
+        use google_cloud_storage::sign::{SignedURLMethod, SignedURLOptions};
+
+        let url_options = SignedURLOptions {
+            method: SignedURLMethod::GET,
+            expires: expiration,
+            ..Default::default()
+        };
+
+        let url_for = self
+            .client
+            .signed_url(
+                &self.bucket_name,
+                key,
+                None, // headers
+                None, // sign_by
+                url_options,
+            )
+            .await
+            .map_err(|e| {
+                warn!(
+                    "Failed to generate signed URL for GCS object: {}: {:?}",
+                    key, e
+                );
+                BackendError::Provider(format!(
+                    "Failed to generate signed URL for '{}': {}",
+                    key, e
+                ))
+            })?;
+
+        debug!(
+            "Generated signed URL for GCS object: {} (expires in {} seconds)",
+            key, expiration_secs
+        );
+        Ok(url_for)
+    }
 }
