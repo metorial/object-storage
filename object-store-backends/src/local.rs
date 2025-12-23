@@ -197,6 +197,12 @@ impl Backend for LocalBackend {
 
         Ok(results)
     }
+
+    async fn get_public_url(&self, _key: &str, _expiration_secs: u64) -> BackendResult<String> {
+        Err(BackendError::Provider(
+            "Public URL generation is not supported for local backend".to_string(),
+        ))
+    }
 }
 
 impl LocalBackend {

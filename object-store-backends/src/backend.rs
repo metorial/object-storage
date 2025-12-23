@@ -56,6 +56,8 @@ pub trait Backend: Send + Sync {
             Err(e) => Err(e),
         }
     }
+
+    async fn get_public_url(&self, key: &str, expiration_secs: u64) -> BackendResult<String>;
 }
 
 pub fn compute_etag(data: &[u8]) -> String {

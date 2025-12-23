@@ -61,6 +61,12 @@ struct ListObjectsResponse {
     objects: Vec<ObjectMetadata>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicUrlResponse {
+    pub url: String,
+    pub expires_in: u64,
+}
+
 pub struct ObjectStoreClient {
     client: Client,
     base_url: String,
@@ -95,7 +101,9 @@ impl ObjectStoreClient {
             StatusCode::BAD_REQUEST => {
                 Err(Error::BadRequest(response.text().await.unwrap_or_default()))
             }
-            _ => Err(Error::ServerError(response.text().await.unwrap_or_default())),
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
         }
     }
 
@@ -108,7 +116,9 @@ impl ObjectStoreClient {
                 let resp: ListBucketsResponse = response.json().await?;
                 Ok(resp.buckets)
             }
-            _ => Err(Error::ServerError(response.text().await.unwrap_or_default())),
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
         }
     }
 
@@ -122,7 +132,9 @@ impl ObjectStoreClient {
             StatusCode::BAD_REQUEST => {
                 Err(Error::BadRequest(response.text().await.unwrap_or_default()))
             }
-            _ => Err(Error::ServerError(response.text().await.unwrap_or_default())),
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
         }
     }
 
@@ -155,7 +167,9 @@ impl ObjectStoreClient {
             StatusCode::BAD_REQUEST => {
                 Err(Error::BadRequest(response.text().await.unwrap_or_default()))
             }
-            _ => Err(Error::ServerError(response.text().await.unwrap_or_default())),
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
         }
     }
 
@@ -207,7 +221,9 @@ impl ObjectStoreClient {
                 })
             }
             StatusCode::NOT_FOUND => Err(Error::NotFound(format!("{}/{}", bucket, key))),
-            _ => Err(Error::ServerError(response.text().await.unwrap_or_default())),
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
         }
     }
 
@@ -254,7 +270,9 @@ impl ObjectStoreClient {
                 })
             }
             StatusCode::NOT_FOUND => Err(Error::NotFound(format!("{}/{}", bucket, key))),
-            _ => Err(Error::ServerError(response.text().await.unwrap_or_default())),
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
         }
     }
 
@@ -265,7 +283,9 @@ impl ObjectStoreClient {
         match response.status() {
             StatusCode::NO_CONTENT => Ok(()),
             StatusCode::NOT_FOUND => Err(Error::NotFound(format!("{}/{}", bucket, key))),
-            _ => Err(Error::ServerError(response.text().await.unwrap_or_default())),
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
         }
     }
 
@@ -298,7 +318,35 @@ impl ObjectStoreClient {
                 Ok(resp.objects)
             }
             StatusCode::NOT_FOUND => Err(Error::NotFound(bucket.to_string())),
-            _ => Err(Error::ServerError(response.text().await.unwrap_or_default())),
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
+        }
+    }
+
+    pub async fn get_public_url(
+        &self,
+        bucket: &str,
+        key: &str,
+        expiration_secs: Option<u64>,
+    ) -> Result<PublicUrlResponse> {
+        let mut url = format!("{}/buckets/{}/public-url/{}", self.base_url, bucket, key);
+
+        if let Some(exp) = expiration_secs {
+            url.push_str(&format!("?expiration_secs={}", exp));
+        }
+
+        let response = self.client.get(&url).send().await?;
+
+        match response.status() {
+            StatusCode::OK => Ok(response.json().await?),
+            StatusCode::NOT_FOUND => Err(Error::NotFound(format!("{}/{}", bucket, key))),
+            StatusCode::BAD_REQUEST => {
+                Err(Error::BadRequest(response.text().await.unwrap_or_default()))
+            }
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
         }
     }
 }
@@ -546,8 +594,84 @@ mod tests {
             .await;
 
         let client = ObjectStoreClient::new(&server.url());
-        let objects = client.list_objects("test-bucket", None, None).await.unwrap();
+        let objects = client
+            .list_objects("test-bucket", None, None)
+            .await
+            .unwrap();
 
         assert_eq!(objects.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_public_url() {
+        let mut server = Server::new_async().await;
+        let _m = server
+            .mock("GET", "/buckets/test-bucket/public-url/test-key")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "expiration_secs".into(),
+                "7200".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"url":"https://example.com/signed-url?signature=abc123","expires_in":7200}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = ObjectStoreClient::new(&server.url());
+        let response = client
+            .get_public_url("test-bucket", "test-key", Some(7200))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.url,
+            "https://example.com/signed-url?signature=abc123"
+        );
+        assert_eq!(response.expires_in, 7200);
+    }
+
+    #[tokio::test]
+    async fn test_get_public_url_default_expiration() {
+        let mut server = Server::new_async().await;
+        let _m = server
+            .mock("GET", "/buckets/test-bucket/public-url/test-key")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"url":"https://example.com/signed-url?signature=xyz789","expires_in":3600}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = ObjectStoreClient::new(&server.url());
+        let response = client
+            .get_public_url("test-bucket", "test-key", None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.url,
+            "https://example.com/signed-url?signature=xyz789"
+        );
+        assert_eq!(response.expires_in, 3600);
+    }
+
+    #[tokio::test]
+    async fn test_get_public_url_not_found() {
+        let mut server = Server::new_async().await;
+        let _m = server
+            .mock("GET", "/buckets/test-bucket/public-url/test-key")
+            .with_status(404)
+            .with_body("Object not found")
+            .create_async()
+            .await;
+
+        let client = ObjectStoreClient::new(&server.url());
+        let result = client.get_public_url("test-bucket", "test-key", None).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::NotFound(_)));
     }
 }

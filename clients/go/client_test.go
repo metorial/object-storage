@@ -251,6 +251,62 @@ func TestListObjectsNoParams(t *testing.T) {
 	assert.Empty(t, objects)
 }
 
+func TestGetPublicURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "GET", r.Method)
+		assert.Equal(t, "/buckets/test-bucket/public-url/test-key", r.URL.Path)
+		assert.Equal(t, "7200", r.URL.Query().Get("expiration_secs"))
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(PublicURLResponse{
+			URL:       "https://example.com/signed-url?signature=abc123",
+			ExpiresIn: 7200,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	expirationSecs := uint64(7200)
+	response, err := client.GetPublicURL("test-bucket", "test-key", &expirationSecs)
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.com/signed-url?signature=abc123", response.URL)
+	assert.Equal(t, uint64(7200), response.ExpiresIn)
+}
+
+func TestGetPublicURLDefaultExpiration(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "GET", r.Method)
+		assert.Equal(t, "/buckets/test-bucket/public-url/test-key", r.URL.Path)
+		assert.Empty(t, r.URL.Query())
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(PublicURLResponse{
+			URL:       "https://example.com/signed-url?signature=xyz789",
+			ExpiresIn: 3600,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	response, err := client.GetPublicURL("test-bucket", "test-key", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "https://example.com/signed-url?signature=xyz789", response.URL)
+	assert.Equal(t, uint64(3600), response.ExpiresIn)
+}
+
+func TestGetPublicURLNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("Object not found"))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	_, err := client.GetPublicURL("test-bucket", "test-key", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Object not found")
+}
+
 func stringPtr(s string) *string {
 	return &s
 }
