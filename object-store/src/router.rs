@@ -17,7 +17,7 @@ pub fn create_router(service: Arc<ObjectStoreService>) -> Router {
         .route("/buckets", post(create_bucket))
         .route("/buckets", put(upsert_bucket))
         .route("/buckets", get(list_buckets))
-        .route("/buckets/:id", get(get_bucket_by_id))
+        .route("/buckets/:bucket", get(get_bucket_by_id))
         .route("/buckets/:bucket", delete(delete_bucket))
         .route("/buckets/:bucket/objects/*key", put(put_object))
         .route("/buckets/:bucket/objects/*key", get(get_object))
