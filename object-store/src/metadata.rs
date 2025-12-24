@@ -290,6 +290,33 @@ impl MetadataStore {
             .ok_or_else(|| ServiceError::BucketNotFound(name.to_string()))
     }
 
+    pub async fn get_bucket_by_id(&self, id: &str) -> ServiceResult<Bucket> {
+        // Ensure cache is fresh
+        self.ensure_cache_fresh().await?;
+
+        // Search cache for bucket by ID
+        {
+            let cache = self.cache.read().await;
+            for bucket in cache.all_buckets() {
+                if bucket.id == id {
+                    return Ok(bucket);
+                }
+            }
+        }
+
+        // Not found in cache - refresh and try again
+        self.refresh_cache().await?;
+
+        let cache = self.cache.read().await;
+        for bucket in cache.all_buckets() {
+            if bucket.id == id {
+                return Ok(bucket);
+            }
+        }
+
+        Err(ServiceError::BucketNotFound(format!("id: {}", id)))
+    }
+
     pub async fn list_buckets(&self) -> ServiceResult<Vec<Bucket>> {
         self.ensure_cache_fresh().await?;
 

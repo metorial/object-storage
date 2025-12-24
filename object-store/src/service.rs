@@ -39,8 +39,23 @@ impl ObjectStoreService {
         Ok(bucket)
     }
 
+    pub async fn upsert_bucket(&self, name: &str) -> ServiceResult<Bucket> {
+        // Try to get existing bucket first
+        if let Ok(bucket) = self.metadata.get_bucket(name).await {
+            debug!("Bucket {} already exists, returning existing", name);
+            return Ok(bucket);
+        }
+
+        // Bucket doesn't exist, create it
+        self.create_bucket(name).await
+    }
+
     pub async fn list_buckets(&self) -> ServiceResult<Vec<Bucket>> {
         self.metadata.list_buckets().await
+    }
+
+    pub async fn get_bucket_by_id(&self, id: &str) -> ServiceResult<Bucket> {
+        self.metadata.get_bucket_by_id(id).await
     }
 
     pub async fn delete_bucket(&self, name: &str) -> ServiceResult<()> {
@@ -196,10 +211,6 @@ impl ObjectStoreService {
             .get_public_url(&full_key, expiration_secs)
             .await?;
 
-        info!(
-            "Generated public URL for object: {}/{} (expires in {} seconds)",
-            bucket, key, expiration_secs
-        );
         Ok(url)
     }
 }
