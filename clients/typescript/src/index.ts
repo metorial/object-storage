@@ -11,6 +11,7 @@ export class ObjectStorageError extends Error {
 }
 
 export interface Bucket {
+  id: string;
   name: string;
   created_at: string;
 }
@@ -66,11 +67,39 @@ export class ObjectStorageClient {
     throw error;
   }
 
+  async ping(): Promise<void> {
+    try {
+      await this.client.get('/ping');
+    } catch (error) {
+      this.handleError(error as AxiosError);
+    }
+  }
+
   async createBucket(name: string): Promise<Bucket> {
     try {
       const response = await this.client.post<Bucket>('/buckets', {
         name,
       } as CreateBucketRequest);
+      return response.data;
+    } catch (error) {
+      this.handleError(error as AxiosError);
+    }
+  }
+
+  async upsertBucket(name: string): Promise<Bucket> {
+    try {
+      const response = await this.client.put<Bucket>('/buckets', {
+        name,
+      } as CreateBucketRequest);
+      return response.data;
+    } catch (error) {
+      this.handleError(error as AxiosError);
+    }
+  }
+
+  async getBucket(id: string): Promise<Bucket> {
+    try {
+      const response = await this.client.get<Bucket>(`/buckets/${id}`);
       return response.data;
     } catch (error) {
       this.handleError(error as AxiosError);
@@ -137,6 +166,15 @@ export class ObjectStorageClient {
       const etag = response.headers['etag'] || '';
       const lastModified = response.headers['last-modified'] || '';
 
+      // Extract custom metadata from x-object-meta-* headers
+      const metadata: Record<string, string> = {};
+      for (const [headerName, headerValue] of Object.entries(response.headers)) {
+        if (headerName.startsWith('x-object-meta-')) {
+          const metaKey = headerName.substring('x-object-meta-'.length);
+          metadata[metaKey] = String(headerValue);
+        }
+      }
+
       return {
         metadata: {
           key,
@@ -144,7 +182,7 @@ export class ObjectStorageClient {
           content_type: contentType,
           etag,
           last_modified: lastModified,
-          metadata: {},
+          metadata,
         },
         data: Buffer.from(response.data),
       };
@@ -162,14 +200,34 @@ export class ObjectStorageClient {
       const etag = response.headers['etag'] || '';
       const lastModified = response.headers['last-modified'] || '';
 
+      // Extract custom metadata from x-object-meta-* headers
+      const metadata: Record<string, string> = {};
+      for (const [headerName, headerValue] of Object.entries(response.headers)) {
+        if (headerName.startsWith('x-object-meta-')) {
+          const metaKey = headerName.substring('x-object-meta-'.length);
+          metadata[metaKey] = String(headerValue);
+        }
+      }
+
       return {
         key,
         size,
         content_type: contentType,
         etag,
         last_modified: lastModified,
-        metadata: {},
+        metadata,
       };
+    } catch (error) {
+      this.handleError(error as AxiosError);
+    }
+  }
+
+  async getObjectInfo(bucket: string, key: string): Promise<ObjectMetadata> {
+    try {
+      const response = await this.client.get<ObjectMetadata>(
+        `/buckets/${bucket}/object-info/${key}`
+      );
+      return response.data;
     } catch (error) {
       this.handleError(error as AxiosError);
     }

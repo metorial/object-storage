@@ -26,6 +26,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bucket {
+    pub id: String,
     pub name: String,
     pub created_at: String,
 }
@@ -87,6 +88,18 @@ impl ObjectStoreClient {
         }
     }
 
+    pub async fn ping(&self) -> Result<()> {
+        let url = format!("{}/ping", self.base_url);
+        let response = self.client.get(&url).send().await?;
+
+        match response.status() {
+            StatusCode::OK => Ok(()),
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
+        }
+    }
+
     pub async fn create_bucket(&self, name: &str) -> Result<Bucket> {
         let url = format!("{}/buckets", self.base_url);
         let req = CreateBucketRequest {
@@ -101,6 +114,38 @@ impl ObjectStoreClient {
             StatusCode::BAD_REQUEST => {
                 Err(Error::BadRequest(response.text().await.unwrap_or_default()))
             }
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
+        }
+    }
+
+    pub async fn upsert_bucket(&self, name: &str) -> Result<Bucket> {
+        let url = format!("{}/buckets", self.base_url);
+        let req = CreateBucketRequest {
+            name: name.to_string(),
+        };
+
+        let response = self.client.put(&url).json(&req).send().await?;
+
+        match response.status() {
+            StatusCode::OK => Ok(response.json().await?),
+            StatusCode::BAD_REQUEST => {
+                Err(Error::BadRequest(response.text().await.unwrap_or_default()))
+            }
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
+        }
+    }
+
+    pub async fn get_bucket(&self, id: &str) -> Result<Bucket> {
+        let url = format!("{}/buckets/{}", self.base_url, id);
+        let response = self.client.get(&url).send().await?;
+
+        match response.status() {
+            StatusCode::OK => Ok(response.json().await?),
+            StatusCode::NOT_FOUND => Err(Error::NotFound(id.to_string())),
             _ => Err(Error::ServerError(
                 response.text().await.unwrap_or_default(),
             )),
@@ -206,6 +251,16 @@ impl ObjectStoreClient {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
 
+                // Extract custom metadata from x-object-meta-* headers
+                let mut metadata = HashMap::new();
+                for (header_name, header_value) in response.headers().iter() {
+                    if let Some(meta_key) = header_name.as_str().strip_prefix("x-object-meta-") {
+                        if let Ok(meta_value) = header_value.to_str() {
+                            metadata.insert(meta_key.to_string(), meta_value.to_string());
+                        }
+                    }
+                }
+
                 let data = response.bytes().await?;
 
                 Ok(ObjectData {
@@ -215,7 +270,7 @@ impl ObjectStoreClient {
                         content_type,
                         etag,
                         last_modified,
-                        metadata: HashMap::new(),
+                        metadata,
                     },
                     data,
                 })
@@ -260,15 +315,38 @@ impl ObjectStoreClient {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
 
+                // Extract custom metadata from x-object-meta-* headers
+                let mut metadata = HashMap::new();
+                for (header_name, header_value) in response.headers().iter() {
+                    if let Some(meta_key) = header_name.as_str().strip_prefix("x-object-meta-") {
+                        if let Ok(meta_value) = header_value.to_str() {
+                            metadata.insert(meta_key.to_string(), meta_value.to_string());
+                        }
+                    }
+                }
+
                 Ok(ObjectMetadata {
                     key: key.to_string(),
                     size,
                     content_type,
                     etag,
                     last_modified,
-                    metadata: HashMap::new(),
+                    metadata,
                 })
             }
+            StatusCode::NOT_FOUND => Err(Error::NotFound(format!("{}/{}", bucket, key))),
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
+        }
+    }
+
+    pub async fn get_object_info(&self, bucket: &str, key: &str) -> Result<ObjectMetadata> {
+        let url = format!("{}/buckets/{}/object-info/{}", self.base_url, bucket, key);
+        let response = self.client.get(&url).send().await?;
+
+        match response.status() {
+            StatusCode::OK => Ok(response.json().await?),
             StatusCode::NOT_FOUND => Err(Error::NotFound(format!("{}/{}", bucket, key))),
             _ => Err(Error::ServerError(
                 response.text().await.unwrap_or_default(),
@@ -369,13 +447,14 @@ mod tests {
             .mock("POST", "/buckets")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"name":"test-bucket","created_at":"2024-01-01T00:00:00Z"}"#)
+            .with_body(r#"{"id":"bucket-123","name":"test-bucket","created_at":"2024-01-01T00:00:00Z"}"#)
             .create_async()
             .await;
 
         let client = ObjectStoreClient::new(&server.url());
         let bucket = client.create_bucket("test-bucket").await.unwrap();
 
+        assert_eq!(bucket.id, "bucket-123");
         assert_eq!(bucket.name, "test-bucket");
         assert_eq!(bucket.created_at, "2024-01-01T00:00:00Z");
     }
@@ -404,7 +483,7 @@ mod tests {
             .mock("GET", "/buckets")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"buckets":[{"name":"bucket1","created_at":"2024-01-01T00:00:00Z"},{"name":"bucket2","created_at":"2024-01-02T00:00:00Z"}]}"#)
+            .with_body(r#"{"buckets":[{"id":"bucket-1","name":"bucket1","created_at":"2024-01-01T00:00:00Z"},{"id":"bucket-2","name":"bucket2","created_at":"2024-01-02T00:00:00Z"}]}"#)
             .create_async()
             .await;
 
@@ -412,7 +491,9 @@ mod tests {
         let buckets = client.list_buckets().await.unwrap();
 
         assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].id, "bucket-1");
         assert_eq!(buckets[0].name, "bucket1");
+        assert_eq!(buckets[1].id, "bucket-2");
         assert_eq!(buckets[1].name, "bucket2");
     }
 

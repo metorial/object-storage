@@ -53,8 +53,8 @@ impl IntoResponse for ServiceError {
             ServiceError::InvalidBucketName(_) | ServiceError::InvalidObjectKey(_) => {
                 (StatusCode::BAD_REQUEST, self.to_string())
             }
-            ServiceError::Backend(object_store_backends::BackendError::NotFound(_)) => {
-                (StatusCode::NOT_FOUND, self.to_string())
+            ServiceError::Backend(object_store_backends::BackendError::NotFound(key)) => {
+                (StatusCode::NOT_FOUND, format!("Object not found: {}", key))
             }
             ServiceError::Backend(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),

@@ -21,6 +21,7 @@ pub struct CreateBucketRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BucketResponse {
+    pub id: String,
     pub name: String,
     pub created_at: String,
 }
@@ -65,6 +66,7 @@ pub struct PublicUrlResponse {
 impl From<Bucket> for BucketResponse {
     fn from(bucket: Bucket) -> Self {
         Self {
+            id: bucket.id,
             name: bucket.name,
             created_at: bucket.created_at,
         }
@@ -91,11 +93,25 @@ pub async fn health_check() -> impl IntoResponse {
     }))
 }
 
+pub async fn ping() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "message": "pong"
+    }))
+}
+
 pub async fn create_bucket(
     State(service): State<SharedService>,
     Json(payload): Json<CreateBucketRequest>,
 ) -> ServiceResult<Json<BucketResponse>> {
     let bucket = service.create_bucket(&payload.name).await?;
+    Ok(Json(bucket.into()))
+}
+
+pub async fn upsert_bucket(
+    State(service): State<SharedService>,
+    Json(payload): Json<CreateBucketRequest>,
+) -> ServiceResult<Json<BucketResponse>> {
+    let bucket = service.upsert_bucket(&payload.name).await?;
     Ok(Json(bucket.into()))
 }
 
@@ -107,6 +123,14 @@ pub async fn list_buckets(
         buckets: buckets.into_iter().map(|b| b.into()).collect(),
     };
     Ok(Json(response))
+}
+
+pub async fn get_bucket_by_id(
+    State(service): State<SharedService>,
+    Path(id): Path<String>,
+) -> ServiceResult<Json<BucketResponse>> {
+    let bucket = service.get_bucket_by_id(&id).await?;
+    Ok(Json(bucket.into()))
 }
 
 pub async fn delete_bucket(
@@ -198,9 +222,27 @@ pub async fn get_object(
             .unwrap_or_else(|_| "0".parse().unwrap()),
     );
 
+    // Add custom metadata as x-object-meta-* headers
+    for (key, value) in obj_data.metadata.custom_metadata.iter() {
+        let header_name = format!("x-object-meta-{}", key);
+        if let Ok(header_value) = value.parse() {
+            if let Ok(header_name) = header_name.parse::<axum::http::HeaderName>() {
+                headers.insert(header_name, header_value);
+            }
+        }
+    }
+
     let body = Body::from_stream(obj_data.stream);
 
     Ok((headers, body).into_response())
+}
+
+pub async fn get_object_info(
+    State(service): State<SharedService>,
+    Path((bucket, key)): Path<(String, String)>,
+) -> ServiceResult<Json<ObjectMetadataResponse>> {
+    let metadata = service.head_object(&bucket, &key).await?;
+    Ok(Json(metadata.into()))
 }
 
 pub async fn head_object(
@@ -242,6 +284,16 @@ pub async fn head_object(
             .parse()
             .unwrap_or_else(|_| "0".parse().unwrap()),
     );
+
+    // Add custom metadata as x-object-meta-* headers
+    for (key, value) in metadata.custom_metadata.iter() {
+        let header_name = format!("x-object-meta-{}", key);
+        if let Ok(header_value) = value.parse() {
+            if let Ok(header_name) = header_name.parse::<axum::http::HeaderName>() {
+                headers.insert(header_name, header_value);
+            }
+        }
+    }
 
     Ok((StatusCode::OK, headers).into_response())
 }
