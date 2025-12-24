@@ -26,11 +26,14 @@ RUN mkdir -p object-store/src object-store-backends/src && \
 COPY object-store ./object-store
 COPY object-store-backends ./object-store-backends
 
+# Remove the cached dummy binaries to force rebuild
+RUN rm -rf target/release/object-store-service target/release/deps/object_store_service* target/release/.fingerprint/object-store-*
+
 # Build the actual binary
 RUN cargo build --release --bin object-store-service
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \

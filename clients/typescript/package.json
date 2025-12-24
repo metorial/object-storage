@@ -1,6 +1,6 @@
 {
   "name": "object-storage-client",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "TypeScript client for Object Storage Service",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

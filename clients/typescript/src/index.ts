@@ -97,7 +97,7 @@ export class ObjectStorageClient {
   async putObject(
     bucket: string,
     key: string,
-    data: Buffer,
+    data: Buffer | Uint8Array | Blob | ReadableStream | string,
     contentType?: string,
     metadata?: Record<string, string>
   ): Promise<ObjectMetadata> {

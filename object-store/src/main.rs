@@ -1,5 +1,7 @@
 use object_store::{Config, ObjectStoreService};
-use object_store_backends::{local::LocalBackend, Backend};
+use object_store_backends::{
+    azure::AzureBackend, gcs::GcsBackend, local::LocalBackend, s3::S3Backend, Backend,
+};
 use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -33,21 +35,30 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(LocalBackend::new(root_path, physical_bucket))
         }
         object_store::config::BackendConfig::S3 {
-            region: _,
-            physical_bucket: _,
-            endpoint: _,
+            region,
+            physical_bucket,
+            endpoint,
         } => {
-            panic!("S3 backend not yet fully implemented - please use local backend for now");
+            info!(
+                "Using S3 backend with bucket: {}, region: {}, endpoint: {:?}",
+                physical_bucket, region, endpoint
+            );
+            Arc::new(S3Backend::new_with_config(physical_bucket, region, endpoint).await?)
         }
-        object_store::config::BackendConfig::Gcs { physical_bucket: _ } => {
-            panic!("GCS backend not yet fully implemented - please use local backend for now");
+        object_store::config::BackendConfig::Gcs { physical_bucket } => {
+            info!("Using GCS backend with bucket: {}", physical_bucket);
+            Arc::new(GcsBackend::new(physical_bucket).await?)
         }
         object_store::config::BackendConfig::Azure {
-            account: _,
-            access_key: _,
-            physical_bucket: _,
+            account,
+            access_key,
+            physical_bucket,
         } => {
-            panic!("Azure backend not yet fully implemented - please use local backend for now");
+            info!(
+                "Using Azure backend with account: {}, container: {}",
+                account, physical_bucket
+            );
+            Arc::new(AzureBackend::new(account, access_key, physical_bucket)?)
         }
     };
 
