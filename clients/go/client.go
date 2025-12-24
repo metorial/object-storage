@@ -17,6 +17,7 @@ type Client struct {
 }
 
 type Bucket struct {
+	ID        string `json:"id"`
 	Name      string `json:"name"`
 	CreatedAt string `json:"created_at"`
 }
@@ -77,6 +78,29 @@ func NewClientWithHTTP(baseURL string, httpClient *http.Client) *Client {
 	}
 }
 
+func (c *Client) Ping() error {
+	req, err := http.NewRequest("GET", c.baseURL+"/ping", nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return &Error{
+			StatusCode: resp.StatusCode,
+			Message:    string(bodyBytes),
+		}
+	}
+
+	return nil
+}
+
 func (c *Client) CreateBucket(name string) (*Bucket, error) {
 	reqBody := createBucketRequest{Name: name}
 	body, err := json.Marshal(reqBody)
@@ -89,6 +113,69 @@ func (c *Client) CreateBucket(name string) (*Bucket, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, &Error{
+			StatusCode: resp.StatusCode,
+			Message:    string(bodyBytes),
+		}
+	}
+
+	var bucket Bucket
+	if err := json.NewDecoder(resp.Body).Decode(&bucket); err != nil {
+		return nil, err
+	}
+
+	return &bucket, nil
+}
+
+func (c *Client) UpsertBucket(name string) (*Bucket, error) {
+	reqBody := createBucketRequest{Name: name}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PUT", c.baseURL+"/buckets", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, &Error{
+			StatusCode: resp.StatusCode,
+			Message:    string(bodyBytes),
+		}
+	}
+
+	var bucket Bucket
+	if err := json.NewDecoder(resp.Body).Decode(&bucket); err != nil {
+		return nil, err
+	}
+
+	return &bucket, nil
+}
+
+func (c *Client) GetBucket(id string) (*Bucket, error) {
+	req, err := http.NewRequest("GET", c.baseURL+"/buckets/"+id, nil)
+	if err != nil {
+		return nil, err
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -233,6 +320,18 @@ func (c *Client) GetObject(bucket, key string) (*ObjectData, error) {
 		ct = &contentType
 	}
 
+	// Extract custom metadata from x-object-meta-* headers
+	metadata := make(map[string]string)
+	for headerName, headerValues := range resp.Header {
+		if len(headerValues) > 0 {
+			const prefix = "X-Object-Meta-"
+			if len(headerName) > len(prefix) && headerName[:len(prefix)] == prefix {
+				metaKey := headerName[len(prefix):]
+				metadata[metaKey] = headerValues[0]
+			}
+		}
+	}
+
 	return &ObjectData{
 		Metadata: ObjectMetadata{
 			Key:          key,
@@ -240,7 +339,7 @@ func (c *Client) GetObject(bucket, key string) (*ObjectData, error) {
 			ContentType:  ct,
 			ETag:         resp.Header.Get("ETag"),
 			LastModified: resp.Header.Get("Last-Modified"),
-			Metadata:     make(map[string]string),
+			Metadata:     metadata,
 		},
 		Data: data,
 	}, nil
@@ -273,14 +372,55 @@ func (c *Client) HeadObject(bucket, key string) (*ObjectMetadata, error) {
 		ct = &contentType
 	}
 
+	// Extract custom metadata from x-object-meta-* headers
+	metadata := make(map[string]string)
+	for headerName, headerValues := range resp.Header {
+		if len(headerValues) > 0 {
+			const prefix = "X-Object-Meta-"
+			if len(headerName) > len(prefix) && headerName[:len(prefix)] == prefix {
+				metaKey := headerName[len(prefix):]
+				metadata[metaKey] = headerValues[0]
+			}
+		}
+	}
+
 	return &ObjectMetadata{
 		Key:          key,
 		Size:         size,
 		ContentType:  ct,
 		ETag:         resp.Header.Get("ETag"),
 		LastModified: resp.Header.Get("Last-Modified"),
-		Metadata:     make(map[string]string),
+		Metadata:     metadata,
 	}, nil
+}
+
+func (c *Client) GetObjectInfo(bucket, key string) (*ObjectMetadata, error) {
+	urlPath := fmt.Sprintf("%s/buckets/%s/object-info/%s", c.baseURL, bucket, key)
+	req, err := http.NewRequest("GET", urlPath, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, &Error{
+			StatusCode: resp.StatusCode,
+			Message:    string(bodyBytes),
+		}
+	}
+
+	var objMetadata ObjectMetadata
+	if err := json.NewDecoder(resp.Body).Decode(&objMetadata); err != nil {
+		return nil, err
+	}
+
+	return &objMetadata, nil
 }
 
 func (c *Client) DeleteObject(bucket, key string) error {
