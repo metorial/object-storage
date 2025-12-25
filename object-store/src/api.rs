@@ -93,12 +93,6 @@ pub async fn health_check() -> impl IntoResponse {
     }))
 }
 
-pub async fn ping() -> impl IntoResponse {
-    Json(serde_json::json!({
-        "message": "pong"
-    }))
-}
-
 pub async fn create_bucket(
     State(service): State<SharedService>,
     Json(payload): Json<CreateBucketRequest>,

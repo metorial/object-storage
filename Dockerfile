@@ -39,9 +39,8 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
-
-RUN apt install -y curl
 
 # Create a non-root user
 RUN useradd -m -u 1000 appuser

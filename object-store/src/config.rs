@@ -69,7 +69,10 @@ impl Config {
     pub fn from_file(path: &str) -> Result<Self, config::ConfigError> {
         let settings = config::Config::builder()
             .add_source(config::File::with_name(path))
-            .add_source(config::Environment::with_prefix("OBJECT_STORE"))
+            .add_source(
+                config::Environment::with_prefix("OBJECT_STORE")
+                    .separator("__")
+            )
             .build()?;
 
         settings.try_deserialize()
@@ -77,7 +80,10 @@ impl Config {
 
     pub fn from_env() -> Result<Self, config::ConfigError> {
         let settings = config::Config::builder()
-            .add_source(config::Environment::with_prefix("OBJECT_STORE"))
+            .add_source(
+                config::Environment::with_prefix("OBJECT_STORE")
+                    .separator("__")
+            )
             .build()?;
 
         settings.try_deserialize()
