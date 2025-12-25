@@ -10,17 +10,12 @@ use crate::error::BackendResult;
 
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PublicUrlPurpose {
+    #[default]
     Retrieve,
     Upload,
-}
-
-impl Default for PublicUrlPurpose {
-    fn default() -> Self {
-        Self::Retrieve
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

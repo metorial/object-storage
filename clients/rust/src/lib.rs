@@ -62,17 +62,12 @@ struct ListObjectsResponse {
     objects: Vec<ObjectMetadata>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PublicUrlPurpose {
+    #[default]
     Retrieve,
     Upload,
-}
-
-impl Default for PublicUrlPurpose {
-    fn default() -> Self {
-        Self::Retrieve
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -475,11 +470,13 @@ mod tests {
             .mock("POST", "/buckets")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"id":"bucket-123","name":"test-bucket","created_at":"2024-01-01T00:00:00Z"}"#)
+            .with_body(
+                r#"{"id":"bucket-123","name":"test-bucket","created_at":"2024-01-01T00:00:00Z"}"#,
+            )
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let bucket = client.create_bucket("test-bucket").await.unwrap();
 
         assert_eq!(bucket.id, "bucket-123");
@@ -497,7 +494,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let result = client.create_bucket("test-bucket").await;
 
         assert!(result.is_err());
@@ -515,7 +512,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let buckets = client.list_buckets().await.unwrap();
 
         assert_eq!(buckets.len(), 2);
@@ -534,7 +531,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let result = client.delete_bucket("test-bucket").await;
 
         assert!(result.is_ok());
@@ -550,7 +547,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let result = client.delete_bucket("test-bucket").await;
 
         assert!(result.is_err());
@@ -568,7 +565,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let data = Bytes::from("Hello, World!");
         let mut metadata = HashMap::new();
         metadata.insert("key1".to_string(), "value1".to_string());
@@ -603,7 +600,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let obj = client.get_object("test-bucket", "test-key").await.unwrap();
 
         assert_eq!(obj.metadata.key, "test-key");
@@ -622,7 +619,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let result = client.get_object("test-bucket", "test-key").await;
 
         assert!(result.is_err());
@@ -642,7 +639,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let obj = client.head_object("test-bucket", "test-key").await.unwrap();
 
         assert_eq!(obj.key, "test-key");
@@ -659,7 +656,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let result = client.delete_object("test-bucket", "test-key").await;
 
         assert!(result.is_ok());
@@ -680,7 +677,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let objects = client
             .list_objects("test-bucket", Some("prefix/"), Some(10))
             .await
@@ -702,7 +699,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let objects = client
             .list_objects("test-bucket", None, None)
             .await
@@ -728,7 +725,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let response = client
             .get_public_url("test-bucket", "test-key", Some(7200), None)
             .await
@@ -754,7 +751,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let response = client
             .get_public_url("test-bucket", "test-key", None, None)
             .await
@@ -777,7 +774,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ObjectStoreClient::new(&server.url());
+        let client = ObjectStoreClient::new(server.url());
         let result = client
             .get_public_url("test-bucket", "test-key", None, None)
             .await;
