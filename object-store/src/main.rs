@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
     let config = if let Ok(config_path) = std::env::var("CONFIG_PATH") {
         Config::from_file(&config_path)?
     } else {
-        Config::default()
+        Config::from_env().unwrap_or_else(|_| Config::default())
     };
 
     info!("Starting object storage service with config: {:?}", config);

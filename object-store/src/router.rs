@@ -13,7 +13,7 @@ use crate::service::ObjectStoreService;
 pub fn create_router(service: Arc<ObjectStoreService>) -> Router {
     Router::new()
         .route("/health", get(health_check))
-        .route("/ping", get(ping))
+        .route("/ping", get(health_check))
         .route("/buckets", post(create_bucket))
         .route("/buckets", put(upsert_bucket))
         .route("/buckets", get(list_buckets))
