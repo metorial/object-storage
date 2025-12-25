@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
-use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata};
+use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata, PublicUrlPurpose};
 use crate::error::{BackendError, BackendResult};
 
 pub struct GcsBackend {
@@ -338,13 +338,23 @@ impl Backend for GcsBackend {
         }
     }
 
-    async fn get_public_url(&self, key: &str, expiration_secs: u64) -> BackendResult<String> {
+    async fn get_public_url(
+        &self,
+        key: &str,
+        expiration_secs: u64,
+        purpose: PublicUrlPurpose,
+    ) -> BackendResult<String> {
         let expiration = std::time::Duration::from_secs(expiration_secs);
 
         use google_cloud_storage::sign::{SignedURLMethod, SignedURLOptions};
 
+        let method = match purpose {
+            PublicUrlPurpose::Retrieve => SignedURLMethod::GET,
+            PublicUrlPurpose::Upload => SignedURLMethod::PUT,
+        };
+
         let url_options = SignedURLOptions {
-            method: SignedURLMethod::GET,
+            method,
             expires: expiration,
             ..Default::default()
         };
@@ -361,18 +371,18 @@ impl Backend for GcsBackend {
             .await
             .map_err(|e| {
                 warn!(
-                    "Failed to generate signed URL for GCS object: {}: {:?}",
-                    key, e
+                    "Failed to generate signed {:?} URL for GCS object: {}: {:?}",
+                    purpose, key, e
                 );
                 BackendError::Provider(format!(
-                    "Failed to generate signed URL for '{}': {}",
-                    key, e
+                    "Failed to generate signed {:?} URL for '{}': {}",
+                    purpose, key, e
                 ))
             })?;
 
         debug!(
-            "Generated signed URL for GCS object: {} (expires in {} seconds)",
-            key, expiration_secs
+            "Generated signed {:?} URL for GCS object: {} (expires in {} seconds)",
+            purpose, key, expiration_secs
         );
         Ok(url_for)
     }

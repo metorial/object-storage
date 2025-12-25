@@ -62,6 +62,19 @@ struct ListObjectsResponse {
     objects: Vec<ObjectMetadata>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PublicUrlPurpose {
+    Retrieve,
+    Upload,
+}
+
+impl Default for PublicUrlPurpose {
+    fn default() -> Self {
+        Self::Retrieve
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicUrlResponse {
     pub url: String,
@@ -407,11 +420,26 @@ impl ObjectStoreClient {
         bucket: &str,
         key: &str,
         expiration_secs: Option<u64>,
+        purpose: Option<PublicUrlPurpose>,
     ) -> Result<PublicUrlResponse> {
         let mut url = format!("{}/buckets/{}/public-url/{}", self.base_url, bucket, key);
+        let mut params = vec![];
 
         if let Some(exp) = expiration_secs {
-            url.push_str(&format!("?expiration_secs={}", exp));
+            params.push(format!("expiration_secs={}", exp));
+        }
+
+        if let Some(p) = purpose {
+            let purpose_str = match p {
+                PublicUrlPurpose::Retrieve => "retrieve",
+                PublicUrlPurpose::Upload => "upload",
+            };
+            params.push(format!("purpose={}", purpose_str));
+        }
+
+        if !params.is_empty() {
+            url.push('?');
+            url.push_str(&params.join("&"));
         }
 
         let response = self.client.get(&url).send().await?;
@@ -702,7 +730,7 @@ mod tests {
 
         let client = ObjectStoreClient::new(&server.url());
         let response = client
-            .get_public_url("test-bucket", "test-key", Some(7200))
+            .get_public_url("test-bucket", "test-key", Some(7200), None)
             .await
             .unwrap();
 
@@ -728,7 +756,7 @@ mod tests {
 
         let client = ObjectStoreClient::new(&server.url());
         let response = client
-            .get_public_url("test-bucket", "test-key", None)
+            .get_public_url("test-bucket", "test-key", None, None)
             .await
             .unwrap();
 
@@ -750,7 +778,9 @@ mod tests {
             .await;
 
         let client = ObjectStoreClient::new(&server.url());
-        let result = client.get_public_url("test-bucket", "test-key", None).await;
+        let result = client
+            .get_public_url("test-bucket", "test-key", None, None)
+            .await;
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::NotFound(_)));

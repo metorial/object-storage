@@ -55,6 +55,7 @@ pub struct ListObjectsQuery {
 #[derive(Debug, Deserialize)]
 pub struct GetPublicUrlQuery {
     pub expiration_secs: Option<u64>,
+    pub purpose: Option<object_store_backends::PublicUrlPurpose>,
 }
 
 #[derive(Debug, Serialize)]
@@ -324,8 +325,13 @@ pub async fn get_public_url(
     // Default expiration is 1 hour (3600 seconds)
     let expiration_secs = params.expiration_secs.unwrap_or(3600);
 
+    // Default purpose is retrieve
+    let purpose = params
+        .purpose
+        .unwrap_or(object_store_backends::PublicUrlPurpose::Retrieve);
+
     let url = service
-        .get_public_url(&bucket, &key, expiration_secs)
+        .get_public_url(&bucket, &key, expiration_secs, purpose)
         .await?;
 
     Ok(Json(PublicUrlResponse {

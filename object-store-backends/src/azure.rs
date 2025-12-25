@@ -9,21 +9,24 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
-use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata};
+use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata, PublicUrlPurpose};
 use crate::error::{BackendError, BackendResult};
 
 pub struct AzureBackend {
     client: ContainerClient,
     container_name: String,
+    account: String,
+    #[allow(dead_code)]
+    access_key: String,
 }
 
 impl AzureBackend {
     pub fn new(account: String, access_key: String, container_name: String) -> BackendResult<Self> {
         let storage_credentials =
-            StorageCredentials::access_key(account.clone(), Secret::new(access_key));
+            StorageCredentials::access_key(account.clone(), Secret::new(access_key.clone()));
 
-        let client =
-            ClientBuilder::new(account, storage_credentials).container_client(&container_name);
+        let client = ClientBuilder::new(account.clone(), storage_credentials)
+            .container_client(&container_name);
 
         info!(
             "Initialized Azure Blob Storage backend with container: {}",
@@ -33,6 +36,8 @@ impl AzureBackend {
         Ok(Self {
             client,
             container_name,
+            account,
+            access_key,
         })
     }
 
@@ -58,10 +63,10 @@ impl AzureBackend {
         }
 
         let storage_credentials =
-            StorageCredentials::access_key(account_name.clone(), Secret::new(access_key));
+            StorageCredentials::access_key(account_name.clone(), Secret::new(access_key.clone()));
 
-        let client =
-            ClientBuilder::new(account_name, storage_credentials).container_client(&container_name);
+        let client = ClientBuilder::new(account_name.clone(), storage_credentials)
+            .container_client(&container_name);
 
         info!(
             "Initialized Azure Blob Storage backend with container: {} from connection string",
@@ -71,6 +76,8 @@ impl AzureBackend {
         Ok(Self {
             client,
             container_name,
+            account: account_name,
+            access_key,
         })
     }
 
@@ -360,9 +367,49 @@ impl Backend for AzureBackend {
         }
     }
 
-    async fn get_public_url(&self, _key: &str, _expiration_secs: u64) -> BackendResult<String> {
-        Err(BackendError::Provider(
-            "Public URL generation is not yet implemented for Azure backend.".to_string(),
-        ))
+    async fn get_public_url(
+        &self,
+        key: &str,
+        expiration_secs: u64,
+        purpose: PublicUrlPurpose,
+    ) -> BackendResult<String> {
+        use azure_storage::shared_access_signature::service_sas::BlobSasPermissions;
+        use time::{Duration, OffsetDateTime};
+
+        let expiry = OffsetDateTime::now_utc() + Duration::seconds(expiration_secs as i64);
+
+        let permissions = match purpose {
+            PublicUrlPurpose::Retrieve => BlobSasPermissions {
+                read: true,
+                ..Default::default()
+            },
+            PublicUrlPurpose::Upload => BlobSasPermissions {
+                write: true,
+                create: true,
+                ..Default::default()
+            },
+        };
+
+        let sas = self
+            .client
+            .shared_access_signature(permissions, expiry)
+            .await
+            .map_err(|e| BackendError::Provider(format!("Failed to generate SAS token: {}", e)))?;
+
+        let token = sas
+            .token()
+            .map_err(|e| BackendError::Provider(format!("Failed to extract SAS token: {}", e)))?;
+
+        let url = format!(
+            "https://{}.blob.core.windows.net/{}/{}?{}",
+            self.account, self.container_name, key, token
+        );
+
+        debug!(
+            "Generated SAS {:?} URL for Azure blob: {} (expires in {} seconds)",
+            purpose, key, expiration_secs
+        );
+
+        Ok(url)
     }
 }
