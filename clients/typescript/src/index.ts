@@ -42,6 +42,11 @@ interface ListObjectsResponse {
   objects: ObjectMetadata[];
 }
 
+export enum PublicUrlPurpose {
+  Retrieve = 'retrieve',
+  Upload = 'upload',
+}
+
 export interface PublicURLResponse {
   url: string;
   expires_in: number;
@@ -269,13 +274,18 @@ export class ObjectStorageClient {
   async getPublicURL(
     bucket: string,
     key: string,
-    expirationSecs?: number
+    expirationSecs?: number,
+    purpose?: PublicUrlPurpose
   ): Promise<PublicURLResponse> {
     try {
-      const params: Record<string, number> = {};
+      const params: Record<string, number | string> = {};
 
       if (expirationSecs !== undefined) {
         params.expiration_secs = expirationSecs;
+      }
+
+      if (purpose !== undefined) {
+        params.purpose = purpose;
       }
 
       const response = await this.client.get<PublicURLResponse>(

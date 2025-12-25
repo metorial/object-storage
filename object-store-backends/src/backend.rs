@@ -10,6 +10,19 @@ use crate::error::BackendResult;
 
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PublicUrlPurpose {
+    Retrieve,
+    Upload,
+}
+
+impl Default for PublicUrlPurpose {
+    fn default() -> Self {
+        Self::Retrieve
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectMetadata {
     pub key: String,
@@ -57,7 +70,12 @@ pub trait Backend: Send + Sync {
         }
     }
 
-    async fn get_public_url(&self, key: &str, expiration_secs: u64) -> BackendResult<String>;
+    async fn get_public_url(
+        &self,
+        key: &str,
+        expiration_secs: u64,
+        purpose: PublicUrlPurpose,
+    ) -> BackendResult<String>;
 }
 
 pub fn compute_etag(data: &[u8]) -> String {

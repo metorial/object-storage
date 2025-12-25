@@ -48,6 +48,13 @@ type listObjectsResponse struct {
 	Objects []ObjectMetadata `json:"objects"`
 }
 
+type PublicUrlPurpose string
+
+const (
+	PublicUrlPurposeRetrieve PublicUrlPurpose = "retrieve"
+	PublicUrlPurposeUpload   PublicUrlPurpose = "upload"
+)
+
 type PublicURLResponse struct {
 	URL       string `json:"url"`
 	ExpiresIn uint64 `json:"expires_in"`
@@ -489,12 +496,18 @@ func (c *Client) ListObjects(bucket string, prefix *string, maxKeys *int) ([]Obj
 	return result.Objects, nil
 }
 
-func (c *Client) GetPublicURL(bucket, key string, expirationSecs *uint64) (*PublicURLResponse, error) {
+func (c *Client) GetPublicURL(bucket, key string, expirationSecs *uint64, purpose *PublicUrlPurpose) (*PublicURLResponse, error) {
 	urlPath := fmt.Sprintf("%s/buckets/%s/public-url/%s", c.baseURL, bucket, key)
 
+	params := url.Values{}
 	if expirationSecs != nil {
-		params := url.Values{}
 		params.Add("expiration_secs", strconv.FormatUint(*expirationSecs, 10))
+	}
+	if purpose != nil {
+		params.Add("purpose", string(*purpose))
+	}
+
+	if len(params) > 0 {
 		urlPath += "?" + params.Encode()
 	}
 

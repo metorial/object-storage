@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, warn};
 
-use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata};
+use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata, PublicUrlPurpose};
 use crate::error::{BackendError, BackendResult};
 
 pub struct S3Backend {
@@ -369,33 +369,57 @@ impl Backend for S3Backend {
         }
     }
 
-    async fn get_public_url(&self, key: &str, expiration_secs: u64) -> BackendResult<String> {
+    async fn get_public_url(
+        &self,
+        key: &str,
+        expiration_secs: u64,
+        purpose: PublicUrlPurpose,
+    ) -> BackendResult<String> {
         let presigning_config = PresigningConfig::expires_in(Duration::from_secs(expiration_secs))
             .map_err(|e| {
                 BackendError::Provider(format!("Failed to create presigning config: {}", e))
             })?;
 
-        let presigned_request = self
-            .client
-            .get_object()
-            .bucket(&self.bucket_name)
-            .key(key)
-            .presigned(presigning_config)
-            .await
-            .map_err(|e| {
-                warn!(
-                    "Failed to generate presigned URL for S3 object: {}: {:?}",
-                    key, e
-                );
-                BackendError::Provider(format!(
-                    "Failed to generate presigned URL for '{}': {}",
-                    key, e
-                ))
-            })?;
+        let presigned_request = match purpose {
+            PublicUrlPurpose::Retrieve => self
+                .client
+                .get_object()
+                .bucket(&self.bucket_name)
+                .key(key)
+                .presigned(presigning_config)
+                .await
+                .map_err(|e| {
+                    warn!(
+                        "Failed to generate presigned GET URL for S3 object: {}: {:?}",
+                        key, e
+                    );
+                    BackendError::Provider(format!(
+                        "Failed to generate presigned GET URL for '{}': {}",
+                        key, e
+                    ))
+                })?,
+            PublicUrlPurpose::Upload => self
+                .client
+                .put_object()
+                .bucket(&self.bucket_name)
+                .key(key)
+                .presigned(presigning_config)
+                .await
+                .map_err(|e| {
+                    warn!(
+                        "Failed to generate presigned PUT URL for S3 object: {}: {:?}",
+                        key, e
+                    );
+                    BackendError::Provider(format!(
+                        "Failed to generate presigned PUT URL for '{}': {}",
+                        key, e
+                    ))
+                })?,
+        };
 
         debug!(
-            "Generated presigned URL for S3 object: {} (expires in {} seconds)",
-            key, expiration_secs
+            "Generated presigned {:?} URL for S3 object: {} (expires in {} seconds)",
+            purpose, key, expiration_secs
         );
         Ok(presigned_request.uri().to_string())
     }

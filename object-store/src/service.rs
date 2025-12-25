@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use object_store_backends::{Backend, ByteStream, ObjectData, ObjectMetadata};
+use object_store_backends::{Backend, ByteStream, ObjectData, ObjectMetadata, PublicUrlPurpose};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -199,6 +199,7 @@ impl ObjectStoreService {
         bucket: &str,
         key: &str,
         expiration_secs: u64,
+        purpose: PublicUrlPurpose,
     ) -> ServiceResult<String> {
         self.metadata.get_bucket(bucket).await?;
 
@@ -208,7 +209,7 @@ impl ObjectStoreService {
 
         let url = self
             .backend
-            .get_public_url(&full_key, expiration_secs)
+            .get_public_url(&full_key, expiration_secs, purpose)
             .await?;
 
         Ok(url)

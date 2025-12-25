@@ -9,7 +9,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info};
 
-use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata};
+use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata, PublicUrlPurpose};
 use crate::error::{BackendError, BackendResult};
 
 pub struct LocalBackend {
@@ -198,7 +198,12 @@ impl Backend for LocalBackend {
         Ok(results)
     }
 
-    async fn get_public_url(&self, _key: &str, _expiration_secs: u64) -> BackendResult<String> {
+    async fn get_public_url(
+        &self,
+        _key: &str,
+        _expiration_secs: u64,
+        _purpose: PublicUrlPurpose,
+    ) -> BackendResult<String> {
         Err(BackendError::Provider(
             "Public URL generation is not supported for local backend".to_string(),
         ))
