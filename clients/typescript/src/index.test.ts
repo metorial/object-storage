@@ -1,5 +1,4 @@
 import MockAdapter from 'axios-mock-adapter';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ObjectStorageClient, ObjectStorageError } from './index';
 
 describe('ObjectStorageClient', () => {
@@ -252,6 +251,39 @@ describe('ObjectStorageClient', () => {
       const results = await client.deleteObjects('test-bucket', []);
       expect(results).toEqual([]);
       expect(mock.history.post).toHaveLength(0);
+    });
+  });
+
+  describe('copyObject', () => {
+    it('should copy an object from another logical bucket', async () => {
+      mock
+        .onPost('/buckets/code-bucket/copy-object/skills/demo/asset.bin')
+        .reply(config => {
+          expect(JSON.parse(config.data)).toEqual({
+            source_bucket: 'files',
+            source_key: 'abc123',
+          });
+
+          return [200, { key: 'skills/demo/asset.bin', size: 42, etag: 'abc' }];
+        });
+
+      const metadata = await client.copyObject(
+        'code-bucket',
+        'skills/demo/asset.bin',
+        'files',
+        'abc123'
+      );
+
+      expect(metadata.key).toBe('skills/demo/asset.bin');
+      expect(metadata.size).toBe(42);
+    });
+
+    it('should handle not found error', async () => {
+      mock.onPost('/buckets/code-bucket/copy-object/a.txt').reply(404);
+
+      await expect(
+        client.copyObject('code-bucket', 'a.txt', 'files', 'missing')
+      ).rejects.toThrow(ObjectStorageError);
     });
   });
 

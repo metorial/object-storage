@@ -244,6 +244,20 @@ Returns one result per requested key, so partial failures stay visible:
 Deleting a key that does not exist counts as deleted. Bucket marker keys
 (`.bucket`) are rejected.
 
+**Copy an object between logical buckets:**
+```
+POST /buckets/{bucket}/copy-object/{key}
+Content-Type: application/json
+
+{"source_bucket": "files", "source_key": "abc123"}
+```
+
+Copies into `{bucket}/{key}` from `source_bucket`/`source_key` and returns the
+destination's object metadata. Both logical buckets live in the same physical
+bucket, so S3 and GCS perform this server-side and the bytes never pass through
+a caller. Other backends fall back to streaming the object through the service.
+Bucket marker keys are rejected as destinations.
+
 **List objects in a bucket:**
 ```
 GET /buckets/{bucket}/objects?prefix=folder/&max_keys=100&continuation_token=...

@@ -139,6 +139,13 @@ for _, result := range results {
 }
 ```
 
+**Copy Object**
+```go
+// Copies into "bucket-name/skills/demo/asset.bin" from "files/abc123".
+// The bytes are copied inside the object store, never through this process.
+metadata, err := client.CopyObject("bucket-name", "skills/demo/asset.bin", "files", "abc123")
+```
+
 **List Objects**
 ```go
 // List all objects, following pagination internally

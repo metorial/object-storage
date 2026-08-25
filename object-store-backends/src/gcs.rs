@@ -3,6 +3,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use google_cloud_storage::client::{Client, ClientConfig};
+use google_cloud_storage::http::objects::copy::CopyObjectRequest;
 use google_cloud_storage::http::objects::delete::DeleteObjectRequest;
 use google_cloud_storage::http::objects::download::Range;
 use google_cloud_storage::http::objects::get::GetObjectRequest;
@@ -274,6 +275,42 @@ impl Backend for GcsBackend {
                     "Failed to delete object '{}': {}",
                     key, e
                 )))
+            }
+        }
+    }
+
+    async fn copy_object(&self, source_key: &str, dest_key: &str) -> BackendResult<ObjectMetadata> {
+        let request = CopyObjectRequest {
+            source_bucket: self.bucket_name.clone(),
+            source_object: source_key.to_string(),
+            destination_bucket: self.bucket_name.clone(),
+            destination_object: dest_key.to_string(),
+            ..Default::default()
+        };
+
+        match self.client.copy_object(&request).await {
+            Ok(object) => {
+                debug!("Copied GCS object {} to {}", source_key, dest_key);
+                Ok(Self::gcs_metadata_to_object_metadata(
+                    object.name,
+                    object.size,
+                    object.updated,
+                    object.md5_hash,
+                    object.content_type,
+                    object.metadata.unwrap_or_default(),
+                ))
+            }
+            Err(e) => {
+                let error_msg = format!("{:?}", e);
+                if error_msg.contains("404") || error_msg.contains("NotFound") {
+                    Err(BackendError::NotFound(source_key.to_string()))
+                } else {
+                    warn!("Failed to copy object in GCS: {} -> {}: {:?}", source_key, dest_key, e);
+                    Err(BackendError::Provider(format!(
+                        "Failed to copy object '{}' to '{}': {}",
+                        source_key, dest_key, e
+                    )))
+                }
             }
         }
     }

@@ -111,6 +111,13 @@ for (const result of results) {
 }
 ```
 
+**Copy Object**
+```typescript
+// Copies into 'bucket-name/skills/demo/asset.bin' from 'files/abc123'.
+// The bytes are copied inside the object store, never through this process.
+const metadata = await client.copyObject('bucket-name', 'skills/demo/asset.bin', 'files', 'abc123');
+```
+
 **List Objects**
 ```typescript
 // List all objects, following pagination internally

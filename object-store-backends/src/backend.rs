@@ -65,6 +65,18 @@ pub trait Backend: Send + Sync {
         Ok(results)
     }
 
+    async fn copy_object(&self, source_key: &str, dest_key: &str) -> BackendResult<ObjectMetadata> {
+        let source = self.get_object(source_key).await?;
+
+        self.put_object(
+            dest_key,
+            source.stream,
+            source.metadata.content_type,
+            source.metadata.custom_metadata,
+        )
+        .await
+    }
+
     async fn list_objects(
         &self,
         prefix: Option<&str>,

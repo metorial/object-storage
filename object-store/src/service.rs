@@ -295,6 +295,37 @@ impl ObjectStoreService {
         self.metadata.clone()
     }
 
+    pub async fn copy_object(
+        &self,
+        source_bucket: &str,
+        source_key: &str,
+        dest_bucket: &str,
+        dest_key: &str,
+    ) -> ServiceResult<ObjectMetadata> {
+        self.metadata.get_bucket(source_bucket).await?;
+        self.metadata.get_bucket(dest_bucket).await?;
+
+        validate_object_key(source_key)?;
+        // Writing over a bucket marker would strand the destination bucket.
+        validate_deletable_object_key(dest_key)?;
+
+        let full_source_key = format!("{}/{}", source_bucket, source_key);
+        let full_dest_key = format!("{}/{}", dest_bucket, dest_key);
+
+        let mut obj_metadata = self
+            .backend
+            .copy_object(&full_source_key, &full_dest_key)
+            .await?;
+
+        obj_metadata.key = dest_key.to_string();
+
+        debug!(
+            "Copied object: {}/{} -> {}/{}",
+            source_bucket, source_key, dest_bucket, dest_key
+        );
+        Ok(obj_metadata)
+    }
+
     pub async fn get_public_url(
         &self,
         bucket: &str,

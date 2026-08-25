@@ -60,6 +60,12 @@ pub struct DeleteObjectsRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct CopyObjectRequest {
+    pub source_bucket: String,
+    pub source_key: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteObjectResultResponse {
     pub key: String,
     pub deleted: bool,
@@ -320,6 +326,18 @@ pub async fn delete_object(
 ) -> ServiceResult<StatusCode> {
     service.delete_object(&bucket, &key).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn copy_object(
+    State(service): State<SharedService>,
+    Path((bucket, key)): Path<(String, String)>,
+    Json(payload): Json<CopyObjectRequest>,
+) -> ServiceResult<Json<ObjectMetadataResponse>> {
+    let metadata = service
+        .copy_object(&payload.source_bucket, &payload.source_key, &bucket, &key)
+        .await?;
+
+    Ok(Json(metadata.into()))
 }
 
 pub async fn delete_objects(

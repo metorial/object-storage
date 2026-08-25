@@ -108,6 +108,15 @@ let results = client
     .await?;
 ```
 
+**Copy Object**
+```rust
+// Copies into "bucket-name/skills/demo/asset.bin" from "files/abc123".
+// The bytes are copied inside the object store, never through this process.
+let metadata = client
+    .copy_object("bucket-name", "skills/demo/asset.bin", "files", "abc123")
+    .await?;
+```
+
 **List Objects**
 ```rust
 // Follows pagination internally

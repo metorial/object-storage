@@ -75,6 +75,12 @@ struct DeleteObjectsRequest {
     keys: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct CopyObjectRequest {
+    source_bucket: String,
+    source_key: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeleteObjectResult {
     pub key: String,
@@ -426,6 +432,39 @@ impl ObjectStoreClient {
                 Ok(resp.results)
             }
             StatusCode::NOT_FOUND => Err(Error::NotFound(bucket.to_string())),
+            StatusCode::BAD_REQUEST => Err(Error::BadRequest(
+                response.text().await.unwrap_or_default(),
+            )),
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
+        }
+    }
+
+    pub async fn copy_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        source_bucket: &str,
+        source_key: &str,
+    ) -> Result<ObjectMetadata> {
+        let url = format!("{}/buckets/{}/copy-object/{}", self.base_url, bucket, key);
+        let response = self
+            .client
+            .post(&url)
+            .json(&CopyObjectRequest {
+                source_bucket: source_bucket.to_string(),
+                source_key: source_key.to_string(),
+            })
+            .send()
+            .await?;
+
+        match response.status() {
+            StatusCode::OK => Ok(response.json().await?),
+            StatusCode::NOT_FOUND => Err(Error::NotFound(format!(
+                "{}/{}",
+                source_bucket, source_key
+            ))),
             StatusCode::BAD_REQUEST => Err(Error::BadRequest(
                 response.text().await.unwrap_or_default(),
             )),

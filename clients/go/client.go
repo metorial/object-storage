@@ -58,6 +58,11 @@ type deleteObjectsRequest struct {
 	Keys []string `json:"keys"`
 }
 
+type copyObjectRequest struct {
+	SourceBucket string `json:"source_bucket"`
+	SourceKey    string `json:"source_key"`
+}
+
 type DeleteObjectResult struct {
 	Key     string  `json:"key"`
 	Deleted bool    `json:"deleted"`
@@ -513,6 +518,44 @@ func (c *Client) DeleteObjects(bucket string, keys []string) ([]DeleteObjectResu
 	}
 
 	return result.Results, nil
+}
+
+func (c *Client) CopyObject(bucket, key, sourceBucket, sourceKey string) (*ObjectMetadata, error) {
+	body, err := json.Marshal(copyObjectRequest{
+		SourceBucket: sourceBucket,
+		SourceKey:    sourceKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	urlPath := fmt.Sprintf("%s/buckets/%s/copy-object/%s", c.baseURL, bucket, key)
+	req, err := http.NewRequest("POST", urlPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, &Error{
+			StatusCode: resp.StatusCode,
+			Message:    string(bodyBytes),
+		}
+	}
+
+	var result ObjectMetadata
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
 }
 
 func (c *Client) ListObjectsPage(bucket string, prefix *string, maxKeys *int, continuationToken *string) (*ObjectPage, error) {

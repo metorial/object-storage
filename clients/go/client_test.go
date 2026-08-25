@@ -357,6 +357,43 @@ func TestDeleteObjectsEmptyIsNoop(t *testing.T) {
 	assert.Empty(t, results)
 }
 
+func TestCopyObject(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "POST", r.Method)
+		assert.Equal(t, "/buckets/code-bucket/copy-object/skills/demo/asset.bin", r.URL.Path)
+
+		var req copyObjectRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.Equal(t, "files", req.SourceBucket)
+		assert.Equal(t, "abc123", req.SourceKey)
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(ObjectMetadata{
+			Key:  "skills/demo/asset.bin",
+			Size: 42,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	metadata, err := client.CopyObject("code-bucket", "skills/demo/asset.bin", "files", "abc123")
+	require.NoError(t, err)
+
+	assert.Equal(t, "skills/demo/asset.bin", metadata.Key)
+	assert.Equal(t, uint64(42), metadata.Size)
+}
+
+func TestCopyObjectNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	_, err := client.CopyObject("code-bucket", "a.txt", "files", "missing")
+	require.Error(t, err)
+}
+
 func TestGetPublicURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "GET", r.Method)

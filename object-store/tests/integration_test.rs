@@ -468,6 +468,111 @@ async fn test_delete_objects_rejects_traversal() {
     assert!(results[0].error.is_some());
 }
 
+async fn read_object_body(service: &Arc<ObjectStoreService>, bucket: &str, key: &str) -> Vec<u8> {
+    let object = service.get_object(bucket, key).await.unwrap();
+    let mut collected = Vec::new();
+    let mut stream = object.stream;
+
+    while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
+        collected.extend_from_slice(&chunk.unwrap());
+    }
+
+    collected
+}
+
+#[tokio::test]
+async fn test_copy_object_across_logical_buckets() {
+    let (service, _temp_dir) = setup_test_service().await;
+    service.create_bucket("files").await.unwrap();
+    service.create_bucket("code-bucket").await.unwrap();
+
+    put_test_object(&service, "files", "abc123").await;
+
+    let metadata = service
+        .copy_object("files", "abc123", "code-bucket", "skills/demo/asset.bin")
+        .await
+        .unwrap();
+
+    // The returned key is bucket-relative, matching what every other call returns.
+    assert_eq!(metadata.key, "skills/demo/asset.bin");
+
+    let copied = read_object_body(&service, "code-bucket", "skills/demo/asset.bin").await;
+    assert_eq!(copied, b"abc123".to_vec());
+
+    // The source survives the copy.
+    let source = read_object_body(&service, "files", "abc123").await;
+    assert_eq!(source, b"abc123".to_vec());
+}
+
+#[tokio::test]
+async fn test_copy_object_rejects_bucket_marker_destination() {
+    let (service, _temp_dir) = setup_test_service().await;
+    service.create_bucket("files").await.unwrap();
+    service.create_bucket("code-bucket").await.unwrap();
+    put_test_object(&service, "files", "abc123").await;
+
+    assert!(service
+        .copy_object("files", "abc123", "code-bucket", ".bucket")
+        .await
+        .is_err());
+    assert!(service
+        .copy_object("files", "abc123", "code-bucket", "nested/.bucket")
+        .await
+        .is_err());
+
+    // The destination bucket is still usable, so no marker was overwritten.
+    put_test_object(&service, "code-bucket", "dir/a.txt").await;
+    let listed = service
+        .list_objects("code-bucket", None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(listed.objects.len(), 1);
+}
+
+#[tokio::test]
+async fn test_copy_object_rejects_traversal() {
+    let (service, _temp_dir) = setup_test_service().await;
+    service.create_bucket("files").await.unwrap();
+    service.create_bucket("code-bucket").await.unwrap();
+
+    assert!(service
+        .copy_object("files", "../other/file.txt", "code-bucket", "a.txt")
+        .await
+        .is_err());
+    assert!(service
+        .copy_object("files", "abc123", "code-bucket", "../other/file.txt")
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn test_copy_object_missing_source() {
+    let (service, _temp_dir) = setup_test_service().await;
+    service.create_bucket("files").await.unwrap();
+    service.create_bucket("code-bucket").await.unwrap();
+
+    assert!(service
+        .copy_object("files", "does-not-exist", "code-bucket", "a.txt")
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn test_copy_object_requires_existing_buckets() {
+    let (service, _temp_dir) = setup_test_service().await;
+    service.create_bucket("files").await.unwrap();
+    put_test_object(&service, "files", "abc123").await;
+
+    assert!(service
+        .copy_object("files", "abc123", "missing-bucket", "a.txt")
+        .await
+        .is_err());
+    assert!(service
+        .copy_object("missing-bucket", "abc123", "files", "a.txt")
+        .await
+        .is_err());
+}
+
 #[tokio::test]
 async fn test_head_object() {
     let (service, _temp_dir) = setup_test_service().await;

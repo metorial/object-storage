@@ -372,6 +372,36 @@ impl Backend for S3Backend {
         Ok(results)
     }
 
+    async fn copy_object(&self, source_key: &str, dest_key: &str) -> BackendResult<ObjectMetadata> {
+        let copy_source = encode_copy_source(&format!("{}/{}", self.bucket_name, source_key));
+
+        match self
+            .client
+            .copy_object()
+            .bucket(&self.bucket_name)
+            .copy_source(&copy_source)
+            .key(dest_key)
+            .send()
+            .await
+        {
+            Ok(_) => {
+                debug!("Copied S3 object {} to {}", source_key, dest_key);
+                self.head_object(dest_key).await
+            }
+            Err(e) => {
+                let error_msg = format!("{:?}", e);
+                if error_msg.contains("NoSuchKey") || error_msg.contains("NotFound") {
+                    Err(BackendError::NotFound(source_key.to_string()))
+                } else {
+                    Err(BackendError::Provider(format!(
+                        "Failed to copy object '{}' to '{}': {}",
+                        source_key, dest_key, e
+                    )))
+                }
+            }
+        }
+    }
+
     async fn list_objects(
         &self,
         prefix: Option<&str>,
@@ -506,5 +536,43 @@ impl Backend for S3Backend {
             purpose, key, expiration_secs
         );
         Ok(presigned_request.uri().to_string())
+    }
+}
+
+/// S3 requires `x-amz-copy-source` to be URL-encoded, but the slashes separating
+/// the bucket from the key have to stay literal.
+fn encode_copy_source(source: &str) -> String {
+    let mut encoded = String::with_capacity(source.len());
+
+    for byte in source.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+
+    encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_copy_source;
+
+    #[test]
+    fn keeps_path_separators_literal() {
+        assert_eq!(
+            encode_copy_source("physical/bkt_1/skills/demo/SKILL.md"),
+            "physical/bkt_1/skills/demo/SKILL.md"
+        );
+    }
+
+    #[test]
+    fn encodes_characters_that_would_break_the_header() {
+        assert_eq!(
+            encode_copy_source("physical/bkt 1/a+b%c.txt"),
+            "physical/bkt%201/a%2Bb%25c.txt"
+        );
     }
 }

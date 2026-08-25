@@ -278,6 +278,23 @@ export class ObjectStorageClient {
     }
   }
 
+  async copyObject(
+    bucket: string,
+    key: string,
+    sourceBucket: string,
+    sourceKey: string
+  ): Promise<ObjectMetadata> {
+    try {
+      const response = await this.client.post<ObjectMetadata>(
+        `/buckets/${bucket}/copy-object/${key}`,
+        { source_bucket: sourceBucket, source_key: sourceKey }
+      );
+      return response.data;
+    } catch (error) {
+      this.handleError(error as AxiosError);
+    }
+  }
+
   async listObjectsPage(
     bucket: string,
     prefix?: string,

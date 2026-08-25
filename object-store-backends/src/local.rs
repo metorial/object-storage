@@ -151,6 +151,34 @@ impl Backend for LocalBackend {
         self.read_metadata(key).await
     }
 
+    async fn copy_object(&self, source_key: &str, dest_key: &str) -> BackendResult<ObjectMetadata> {
+        debug!("Copying object: {} -> {}", source_key, dest_key);
+
+        let source_path = self.get_full_path(source_key)?;
+        if !source_path.exists() {
+            return Err(BackendError::NotFound(source_key.to_string()));
+        }
+
+        let dest_path = self.get_full_path(dest_key)?;
+        if let Some(parent) = dest_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        fs::copy(&source_path, &dest_path).await?;
+
+        let source_metadata = self.read_metadata(source_key).await?;
+        let metadata = ObjectMetadata {
+            key: dest_key.to_string(),
+            last_modified: Utc::now(),
+            ..source_metadata
+        };
+
+        self.write_metadata(&metadata).await?;
+
+        info!("Object copied: {} -> {}", source_key, dest_key);
+        Ok(metadata)
+    }
+
     async fn delete_object(&self, key: &str) -> BackendResult<()> {
         debug!("Deleting object: {}", key);
 
