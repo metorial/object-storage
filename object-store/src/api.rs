@@ -44,12 +44,33 @@ pub struct ObjectMetadataResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ListObjectsResponse {
     pub objects: Vec<ObjectMetadataResponse>,
+    pub next_continuation_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ListObjectsQuery {
     pub prefix: Option<String>,
     pub max_keys: Option<usize>,
+    pub continuation_token: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteObjectsRequest {
+    pub keys: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteObjectResultResponse {
+    pub key: String,
+    pub deleted: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteObjectsResponse {
+    pub results: Vec<DeleteObjectResultResponse>,
+    pub deleted: usize,
+    pub failed: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -301,17 +322,46 @@ pub async fn delete_object(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn delete_objects(
+    State(service): State<SharedService>,
+    Path(bucket): Path<String>,
+    Json(payload): Json<DeleteObjectsRequest>,
+) -> ServiceResult<Json<DeleteObjectsResponse>> {
+    let results = service.delete_objects(&bucket, &payload.keys).await?;
+
+    let deleted = results.iter().filter(|r| r.deleted).count();
+
+    Ok(Json(DeleteObjectsResponse {
+        failed: results.len() - deleted,
+        deleted,
+        results: results
+            .into_iter()
+            .map(|r| DeleteObjectResultResponse {
+                key: r.key,
+                deleted: r.deleted,
+                error: r.error,
+            })
+            .collect(),
+    }))
+}
+
 pub async fn list_objects(
     State(service): State<SharedService>,
     Path(bucket): Path<String>,
     Query(params): Query<ListObjectsQuery>,
 ) -> ServiceResult<Json<ListObjectsResponse>> {
-    let objects = service
-        .list_objects(&bucket, params.prefix.as_deref(), params.max_keys)
+    let page = service
+        .list_objects(
+            &bucket,
+            params.prefix.as_deref(),
+            params.max_keys,
+            params.continuation_token.as_deref(),
+        )
         .await?;
 
     let response = ListObjectsResponse {
-        objects: objects.into_iter().map(|o| o.into()).collect(),
+        objects: page.objects.into_iter().map(|o| o.into()).collect(),
+        next_continuation_token: page.next_continuation_token,
     };
 
     Ok(Json(response))

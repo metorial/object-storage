@@ -278,6 +278,196 @@ async fn test_list_objects() {
     assert_eq!(json["objects"].as_array().unwrap().len(), 1);
 }
 
+async fn put_test_object(service: &Arc<ObjectStoreService>, bucket: &str, key: &str) {
+    let data = key.as_bytes().to_vec();
+    let stream: object_store_backends::ByteStream =
+        Box::pin(stream::once(async move { Ok(Bytes::from(data)) }));
+    service
+        .put_object(bucket, key, stream, None, Default::default())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_list_objects_pagination_covers_every_object() {
+    let (service, _temp_dir) = setup_test_service().await;
+    service.create_bucket("test-bucket").await.unwrap();
+
+    for i in 0..25 {
+        put_test_object(&service, "test-bucket", &format!("dir/file{:03}.txt", i)).await;
+    }
+
+    let mut seen = Vec::new();
+    let mut token: Option<String> = None;
+    let mut pages = 0;
+
+    loop {
+        let page = service
+            .list_objects("test-bucket", None, Some(7), token.as_deref())
+            .await
+            .unwrap();
+
+        pages += 1;
+        seen.extend(page.objects.into_iter().map(|o| o.key));
+
+        match page.next_continuation_token {
+            Some(next) => token = Some(next),
+            None => break,
+        }
+
+        assert!(pages < 20, "pagination did not terminate");
+    }
+
+    assert!(pages > 1, "expected the listing to span several pages");
+    assert_eq!(seen.len(), 25);
+
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 25, "pages overlapped or skipped objects");
+}
+
+#[tokio::test]
+async fn test_list_objects_pagination_respects_prefix() {
+    let (service, _temp_dir) = setup_test_service().await;
+    service.create_bucket("test-bucket").await.unwrap();
+
+    for i in 0..12 {
+        put_test_object(&service, "test-bucket", &format!("keep/file{:03}.txt", i)).await;
+        put_test_object(&service, "test-bucket", &format!("other/file{:03}.txt", i)).await;
+    }
+
+    let mut seen = Vec::new();
+    let mut token: Option<String> = None;
+
+    loop {
+        let page = service
+            .list_objects("test-bucket", Some("keep/"), Some(5), token.as_deref())
+            .await
+            .unwrap();
+
+        seen.extend(page.objects.into_iter().map(|o| o.key));
+
+        match page.next_continuation_token {
+            Some(next) => token = Some(next),
+            None => break,
+        }
+    }
+
+    assert_eq!(seen.len(), 12);
+    assert!(seen.iter().all(|key| key.starts_with("keep/")));
+}
+
+#[tokio::test]
+async fn test_list_objects_prefix_with_leading_slash() {
+    let (service, _temp_dir) = setup_test_service().await;
+    service.create_bucket("test-bucket").await.unwrap();
+
+    put_test_object(&service, "test-bucket", "dir/file.txt").await;
+
+    // A leading slash must not turn into a double slash in the backend key space.
+    let page = service
+        .list_objects("test-bucket", Some("/dir/"), None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(page.objects.len(), 1);
+    assert_eq!(page.objects[0].key, "dir/file.txt");
+}
+
+#[tokio::test]
+async fn test_delete_objects_bulk() {
+    let (service, _temp_dir) = setup_test_service().await;
+    let app = object_store::router::create_router(service.clone());
+
+    service.create_bucket("test-bucket").await.unwrap();
+    put_test_object(&service, "test-bucket", "dir/a.txt").await;
+    put_test_object(&service, "test-bucket", "dir/b.txt").await;
+    put_test_object(&service, "test-bucket", "dir/keep.txt").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/buckets/test-bucket/objects/delete")
+                .header("content-type", "application/json")
+                // "dir/missing.txt" was never written: deleting it is a no-op,
+                // not a failure.
+                .body(Body::from(
+                    json!({ "keys": ["dir/a.txt", "dir/b.txt", "dir/missing.txt"] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["deleted"], 3);
+    assert_eq!(json["failed"], 0);
+    assert_eq!(json["results"].as_array().unwrap().len(), 3);
+
+    let remaining = service
+        .list_objects("test-bucket", None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(remaining.objects.len(), 1);
+    assert_eq!(remaining.objects[0].key, "dir/keep.txt");
+}
+
+#[tokio::test]
+async fn test_delete_objects_rejects_bucket_marker() {
+    let (service, _temp_dir) = setup_test_service().await;
+    service.create_bucket("test-bucket").await.unwrap();
+    put_test_object(&service, "test-bucket", "dir/a.txt").await;
+
+    let results = service
+        .delete_objects(
+            "test-bucket",
+            &[
+                ".bucket".to_string(),
+                "nested/.bucket".to_string(),
+                "dir/a.txt".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert!(!results[0].deleted);
+    assert!(!results[1].deleted);
+    assert!(results[2].deleted);
+
+    assert!(results[0].error.is_some());
+    assert!(results[1].error.is_some());
+
+    // The bucket must still be usable: marker objects were never touched.
+    put_test_object(&service, "test-bucket", "dir/b.txt").await;
+    let remaining = service
+        .list_objects("test-bucket", None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(remaining.objects.len(), 1);
+    assert_eq!(remaining.objects[0].key, "dir/b.txt");
+}
+
+#[tokio::test]
+async fn test_delete_objects_rejects_traversal() {
+    let (service, _temp_dir) = setup_test_service().await;
+    service.create_bucket("test-bucket").await.unwrap();
+
+    let results = service
+        .delete_objects("test-bucket", &["../other-bucket/file.txt".to_string()])
+        .await
+        .unwrap();
+
+    assert!(!results[0].deleted);
+    assert!(results[0].error.is_some());
+}
+
 #[tokio::test]
 async fn test_head_object() {
     let (service, _temp_dir) = setup_test_service().await;

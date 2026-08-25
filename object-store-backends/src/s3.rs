@@ -12,7 +12,9 @@ use std::time::Duration;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, warn};
 
-use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata, PublicUrlPurpose};
+use crate::backend::{
+    Backend, ByteStream, ObjectData, ObjectMetadata, ObjectPage, PublicUrlPurpose,
+};
 use crate::error::{BackendError, BackendResult};
 
 pub struct S3Backend {
@@ -302,11 +304,80 @@ impl Backend for S3Backend {
         }
     }
 
+    async fn delete_objects(&self, keys: &[String]) -> BackendResult<Vec<BackendResult<()>>> {
+        use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+
+        let mut results: Vec<BackendResult<()>> = Vec::with_capacity(keys.len());
+
+        for chunk in keys.chunks(1000) {
+            let mut identifiers = Vec::with_capacity(chunk.len());
+            for key in chunk {
+                match ObjectIdentifier::builder().key(key).build() {
+                    Ok(identifier) => identifiers.push(identifier),
+                    Err(e) => {
+                        return Err(BackendError::Provider(format!(
+                            "Failed to build delete request for '{}': {}",
+                            key, e
+                        )))
+                    }
+                }
+            }
+
+            let delete = Delete::builder()
+                .set_objects(Some(identifiers))
+                .quiet(false)
+                .build()
+                .map_err(|e| {
+                    BackendError::Provider(format!("Failed to build delete request: {}", e))
+                })?;
+
+            let output = self
+                .client
+                .delete_objects()
+                .bucket(&self.bucket_name)
+                .delete(delete)
+                .send()
+                .await
+                .map_err(|e| {
+                    warn!("Failed to batch delete objects from S3: {:?}", e);
+                    BackendError::Provider(format!("Failed to delete objects: {}", e))
+                })?;
+
+            let mut failures: HashMap<&str, String> = HashMap::new();
+            for error in output.errors() {
+                if let Some(key) = error.key() {
+                    failures.insert(
+                        key,
+                        format!(
+                            "{}: {}",
+                            error.code().unwrap_or("Unknown"),
+                            error.message().unwrap_or("delete failed")
+                        ),
+                    );
+                }
+            }
+
+            for key in chunk {
+                match failures.get(key.as_str()) {
+                    Some(message) => results.push(Err(BackendError::Provider(format!(
+                        "Failed to delete object '{}': {}",
+                        key, message
+                    )))),
+                    None => results.push(Ok(())),
+                }
+            }
+        }
+
+        debug!("Batch deleted {} objects from S3", keys.len());
+        Ok(results)
+    }
+
     async fn list_objects(
         &self,
         prefix: Option<&str>,
         max_keys: Option<usize>,
-    ) -> BackendResult<Vec<ObjectMetadata>> {
+        continuation_token: Option<&str>,
+    ) -> BackendResult<ObjectPage> {
         let mut request = self.client.list_objects_v2().bucket(&self.bucket_name);
 
         if let Some(p) = prefix {
@@ -315,6 +386,10 @@ impl Backend for S3Backend {
 
         if let Some(max) = max_keys {
             request = request.max_keys(max as i32);
+        }
+
+        if let Some(token) = continuation_token {
+            request = request.continuation_token(token);
         }
 
         match request.send().await {
@@ -349,7 +424,16 @@ impl Backend for S3Backend {
                     prefix
                 );
 
-                Ok(objects)
+                let next_continuation_token = if output.is_truncated().unwrap_or(false) {
+                    output.next_continuation_token().map(|t| t.to_string())
+                } else {
+                    None
+                };
+
+                Ok(ObjectPage {
+                    objects,
+                    next_continuation_token,
+                })
             }
             Err(e) => {
                 let error_msg = format!("{:?}", e);

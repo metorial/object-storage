@@ -45,7 +45,29 @@ type listBucketsResponse struct {
 }
 
 type listObjectsResponse struct {
-	Objects []ObjectMetadata `json:"objects"`
+	Objects               []ObjectMetadata `json:"objects"`
+	NextContinuationToken *string          `json:"next_continuation_token,omitempty"`
+}
+
+type ObjectPage struct {
+	Objects               []ObjectMetadata
+	NextContinuationToken *string
+}
+
+type deleteObjectsRequest struct {
+	Keys []string `json:"keys"`
+}
+
+type DeleteObjectResult struct {
+	Key     string  `json:"key"`
+	Deleted bool    `json:"deleted"`
+	Error   *string `json:"error,omitempty"`
+}
+
+type deleteObjectsResponse struct {
+	Results []DeleteObjectResult `json:"results"`
+	Deleted int                  `json:"deleted"`
+	Failed  int                  `json:"failed"`
 }
 
 type PublicUrlPurpose string
@@ -454,7 +476,46 @@ func (c *Client) DeleteObject(bucket, key string) error {
 	return nil
 }
 
-func (c *Client) ListObjects(bucket string, prefix *string, maxKeys *int) ([]ObjectMetadata, error) {
+func (c *Client) DeleteObjects(bucket string, keys []string) ([]DeleteObjectResult, error) {
+	if len(keys) == 0 {
+		return []DeleteObjectResult{}, nil
+	}
+
+	body, err := json.Marshal(deleteObjectsRequest{Keys: keys})
+	if err != nil {
+		return nil, err
+	}
+
+	urlPath := fmt.Sprintf("%s/buckets/%s/objects/delete", c.baseURL, bucket)
+	req, err := http.NewRequest("POST", urlPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, &Error{
+			StatusCode: resp.StatusCode,
+			Message:    string(bodyBytes),
+		}
+	}
+
+	var result deleteObjectsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return result.Results, nil
+}
+
+func (c *Client) ListObjectsPage(bucket string, prefix *string, maxKeys *int, continuationToken *string) (*ObjectPage, error) {
 	urlPath := fmt.Sprintf("%s/buckets/%s/objects", c.baseURL, bucket)
 
 	params := url.Values{}
@@ -463,6 +524,9 @@ func (c *Client) ListObjects(bucket string, prefix *string, maxKeys *int) ([]Obj
 	}
 	if maxKeys != nil {
 		params.Add("max_keys", strconv.Itoa(*maxKeys))
+	}
+	if continuationToken != nil {
+		params.Add("continuation_token", *continuationToken)
 	}
 
 	if len(params) > 0 {
@@ -493,7 +557,34 @@ func (c *Client) ListObjects(bucket string, prefix *string, maxKeys *int) ([]Obj
 		return nil, err
 	}
 
-	return result.Objects, nil
+	return &ObjectPage{
+		Objects:               result.Objects,
+		NextContinuationToken: result.NextContinuationToken,
+	}, nil
+}
+
+func (c *Client) ListObjects(bucket string, prefix *string, maxKeys *int) ([]ObjectMetadata, error) {
+	objects := []ObjectMetadata{}
+	var token *string
+
+	for {
+		page, err := c.ListObjectsPage(bucket, prefix, maxKeys, token)
+		if err != nil {
+			return nil, err
+		}
+
+		objects = append(objects, page.Objects...)
+
+		if maxKeys != nil && len(objects) >= *maxKeys {
+			return objects[:*maxKeys], nil
+		}
+
+		if page.NextContinuationToken == nil || *page.NextContinuationToken == "" {
+			return objects, nil
+		}
+
+		token = page.NextContinuationToken
+	}
 }
 
 func (c *Client) GetPublicURL(bucket, key string, expirationSecs *uint64, purpose *PublicUrlPurpose) (*PublicURLResponse, error) {

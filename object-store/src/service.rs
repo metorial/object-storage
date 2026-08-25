@@ -1,11 +1,21 @@
 use bytes::Bytes;
-use object_store_backends::{Backend, ByteStream, ObjectData, ObjectMetadata, PublicUrlPurpose};
+use object_store_backends::error::BackendError;
+use object_store_backends::{
+    Backend, ByteStream, ObjectData, ObjectMetadata, ObjectPage, PublicUrlPurpose,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info};
 
 use crate::error::{ServiceError, ServiceResult};
 use crate::metadata::{Bucket, MetadataStore};
+
+#[derive(Debug, Clone)]
+pub struct DeleteObjectResult {
+    pub key: String,
+    pub deleted: bool,
+    pub error: Option<String>,
+}
 
 pub struct ObjectStoreService {
     backend: Arc<dyn Backend>,
@@ -61,9 +71,7 @@ impl ObjectStoreService {
     pub async fn delete_bucket(&self, name: &str) -> ServiceResult<()> {
         self.metadata.get_bucket(name).await?;
 
-        // List all objects in the bucket to see if it's empty
-        let objects = self.list_objects(name, None, None).await?;
-        if !objects.is_empty() {
+        if !self.is_bucket_empty(name).await? {
             return Err(ServiceError::Internal(format!(
                 "Bucket {} is not empty",
                 name
@@ -143,27 +151,44 @@ impl ObjectStoreService {
         Ok(())
     }
 
+    async fn is_bucket_empty(&self, bucket: &str) -> ServiceResult<bool> {
+        let mut token: Option<String> = None;
+
+        loop {
+            let page = self
+                .list_objects(bucket, None, Some(16), token.as_deref())
+                .await?;
+
+            if !page.objects.is_empty() {
+                return Ok(false);
+            }
+
+            match page.next_continuation_token {
+                Some(next) => token = Some(next),
+                None => return Ok(true),
+            }
+        }
+    }
+
     pub async fn list_objects(
         &self,
         bucket: &str,
         prefix: Option<&str>,
         max_keys: Option<usize>,
-    ) -> ServiceResult<Vec<ObjectMetadata>> {
+        continuation_token: Option<&str>,
+    ) -> ServiceResult<ObjectPage> {
         self.metadata.get_bucket(bucket).await?;
 
-        let full_prefix = if let Some(p) = prefix {
-            format!("{}/{}", bucket, p)
-        } else {
-            format!("{}/", bucket)
-        };
+        let full_prefix = bucket_scoped_prefix(bucket, prefix);
 
-        let objects = self
+        let page = self
             .backend
-            .list_objects(Some(&full_prefix), max_keys)
+            .list_objects(Some(&full_prefix), max_keys, continuation_token)
             .await?;
 
         let bucket_prefix = format!("{}/", bucket);
-        let filtered: Vec<ObjectMetadata> = objects
+        let objects: Vec<ObjectMetadata> = page
+            .objects
             .into_iter()
             .filter(|obj| !obj.key.ends_with("/.bucket"))
             .map(|mut obj| {
@@ -174,8 +199,84 @@ impl ObjectStoreService {
             })
             .collect();
 
-        debug!("Listed {} objects in bucket: {}", filtered.len(), bucket);
-        Ok(filtered)
+        debug!("Listed {} objects in bucket: {}", objects.len(), bucket);
+        Ok(ObjectPage {
+            objects,
+            next_continuation_token: page.next_continuation_token,
+        })
+    }
+
+    pub async fn delete_objects(
+        &self,
+        bucket: &str,
+        keys: &[String],
+    ) -> ServiceResult<Vec<DeleteObjectResult>> {
+        self.metadata.get_bucket(bucket).await?;
+
+        let mut validation_errors: HashMap<usize, String> = HashMap::new();
+        let mut full_keys: Vec<String> = Vec::new();
+        let mut full_key_indices: Vec<usize> = Vec::new();
+
+        for (index, key) in keys.iter().enumerate() {
+            match validate_deletable_object_key(key) {
+                Ok(()) => {
+                    full_keys.push(format!("{}/{}", bucket, key));
+                    full_key_indices.push(index);
+                }
+                Err(e) => {
+                    validation_errors.insert(index, e.to_string());
+                }
+            }
+        }
+
+        let mut backend_results = if full_keys.is_empty() {
+            Vec::new()
+        } else {
+            self.backend.delete_objects(&full_keys).await?
+        };
+
+        let mut by_index: HashMap<usize, Option<String>> = HashMap::new();
+        for (position, result) in backend_results.drain(..).enumerate() {
+            let index = full_key_indices[position];
+            let error = match result {
+                Ok(()) | Err(BackendError::NotFound(_)) => None,
+                Err(e) => Some(e.to_string()),
+            };
+            by_index.insert(index, error);
+        }
+
+        let results = keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| match validation_errors.remove(&index) {
+                Some(error) => DeleteObjectResult {
+                    key: key.clone(),
+                    deleted: false,
+                    error: Some(error),
+                },
+                None => match by_index.remove(&index).flatten() {
+                    Some(error) => DeleteObjectResult {
+                        key: key.clone(),
+                        deleted: false,
+                        error: Some(error),
+                    },
+                    None => DeleteObjectResult {
+                        key: key.clone(),
+                        deleted: true,
+                        error: None,
+                    },
+                },
+            })
+            .collect::<Vec<_>>();
+
+        info!(
+            "Deleted {}/{} objects in bucket: {}",
+            results.iter().filter(|r| r.deleted).count(),
+            results.len(),
+            bucket
+        );
+
+        Ok(results)
     }
 
     pub async fn object_exists(&self, bucket: &str, key: &str) -> ServiceResult<bool> {
@@ -214,6 +315,25 @@ impl ObjectStoreService {
 
         Ok(url)
     }
+}
+
+fn bucket_scoped_prefix(bucket: &str, prefix: Option<&str>) -> String {
+    match prefix.map(|p| p.trim_start_matches('/')) {
+        Some(p) if !p.is_empty() => format!("{}/{}", bucket, p),
+        _ => format!("{}/", bucket),
+    }
+}
+
+fn validate_deletable_object_key(key: &str) -> ServiceResult<()> {
+    validate_object_key(key)?;
+
+    if key == ".bucket" || key.ends_with("/.bucket") {
+        return Err(ServiceError::InvalidObjectKey(
+            ".bucket is a reserved name".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_object_key(key: &str) -> ServiceResult<()> {

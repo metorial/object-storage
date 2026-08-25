@@ -9,7 +9,9 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info};
 
-use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata, PublicUrlPurpose};
+use crate::backend::{
+    Backend, ByteStream, ObjectData, ObjectMetadata, ObjectPage, PublicUrlPurpose,
+};
 use crate::error::{BackendError, BackendResult};
 
 pub struct LocalBackend {
@@ -173,29 +175,53 @@ impl Backend for LocalBackend {
         &self,
         prefix: Option<&str>,
         max_keys: Option<usize>,
-    ) -> BackendResult<Vec<ObjectMetadata>> {
+        continuation_token: Option<&str>,
+    ) -> BackendResult<ObjectPage> {
         debug!("Listing objects with prefix: {:?}", prefix);
 
         let bucket_path = self.root_path.join(&self.bucket_name);
-        let mut results = Vec::new();
 
         let prefix_str = prefix.unwrap_or("");
         let search_path = if prefix_str.is_empty() {
             bucket_path.clone()
         } else {
-            bucket_path.join(prefix_str)
+            let candidate = bucket_path.join(prefix_str);
+            if candidate.is_dir() {
+                candidate
+            } else {
+                candidate.parent().unwrap_or(&bucket_path).to_path_buf()
+            }
         };
 
-        self.list_recursive(
-            &bucket_path,
-            &search_path,
-            prefix_str,
-            &mut results,
-            max_keys,
-        )
-        .await?;
+        let mut keys = Vec::new();
+        Self::collect_keys(&bucket_path, &search_path, prefix_str, &mut keys).await?;
 
-        Ok(results)
+        keys.sort();
+
+        if let Some(token) = continuation_token {
+            let start = keys.partition_point(|key| key.as_str() <= token);
+            keys.drain(..start);
+        }
+
+        let next_continuation_token = match max_keys {
+            Some(max) if keys.len() > max => {
+                keys.truncate(max);
+                keys.last().cloned()
+            }
+            _ => None,
+        };
+
+        let mut objects = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Ok(metadata) = self.read_metadata(&key).await {
+                objects.push(metadata);
+            }
+        }
+
+        Ok(ObjectPage {
+            objects,
+            next_continuation_token,
+        })
     }
 
     async fn get_public_url(
@@ -211,39 +237,19 @@ impl Backend for LocalBackend {
 }
 
 impl LocalBackend {
-    fn list_recursive<'a>(
-        &'a self,
+    fn collect_keys<'a>(
         bucket_path: &'a Path,
         current_path: &'a Path,
         prefix: &'a str,
-        results: &'a mut Vec<ObjectMetadata>,
-        max_keys: Option<usize>,
+        keys: &'a mut Vec<String>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = BackendResult<()>> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(max) = max_keys {
-                if results.len() >= max {
-                    return Ok(());
-                }
-            }
-
             if !current_path.exists() {
                 return Ok(());
             }
 
             if current_path.is_file() {
-                if current_path.extension().and_then(|s| s.to_str()) == Some("json") {
-                    return Ok(());
-                }
-
-                if let Ok(relative) = current_path.strip_prefix(bucket_path) {
-                    let key = relative.to_string_lossy().to_string();
-
-                    if key.starts_with(prefix) {
-                        if let Ok(metadata) = self.read_metadata(&key).await {
-                            results.push(metadata);
-                        }
-                    }
-                }
+                Self::push_key(bucket_path, current_path, prefix, keys);
                 return Ok(());
             }
 
@@ -252,29 +258,29 @@ impl LocalBackend {
                 let path = entry.path();
 
                 if path.is_dir() {
-                    self.list_recursive(bucket_path, &path, prefix, results, max_keys)
-                        .await?;
-                } else if !path.to_string_lossy().ends_with(".meta.json") {
-                    if let Some(max) = max_keys {
-                        if results.len() >= max {
-                            break;
-                        }
-                    }
-
-                    if let Ok(relative) = path.strip_prefix(bucket_path) {
-                        let key = relative.to_string_lossy().to_string();
-
-                        if key.starts_with(prefix) {
-                            if let Ok(metadata) = self.read_metadata(&key).await {
-                                results.push(metadata);
-                            }
-                        }
-                    }
+                    Self::collect_keys(bucket_path, &path, prefix, keys).await?;
+                } else {
+                    Self::push_key(bucket_path, &path, prefix, keys);
                 }
             }
 
             Ok(())
         })
+    }
+
+    fn push_key(bucket_path: &Path, path: &Path, prefix: &str, keys: &mut Vec<String>) {
+        if path.to_string_lossy().ends_with(".meta.json") {
+            return;
+        }
+
+        let Ok(relative) = path.strip_prefix(bucket_path) else {
+            return;
+        };
+
+        let key = relative.to_string_lossy().to_string();
+        if key.starts_with(prefix) {
+            keys.push(key);
+        }
     }
 }
 

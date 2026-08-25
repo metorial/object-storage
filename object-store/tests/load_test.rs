@@ -185,7 +185,7 @@ async fn test_mixed_operations() {
                     _ => {
                         // List
                         service
-                            .list_objects("load-test-bucket", None, Some(10))
+                            .list_objects("load-test-bucket", None, Some(10), None)
                             .await
                             .map(|_| ())
                     }

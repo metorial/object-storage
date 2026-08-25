@@ -101,9 +101,23 @@ let metadata = client.head_object("bucket-name", "object-key").await?;
 client.delete_object("bucket-name", "object-key").await?;
 ```
 
+**Delete Many Objects**
+```rust
+let results = client
+    .delete_objects("bucket-name", &["a.txt".to_string(), "b.txt".to_string()])
+    .await?;
+```
+
 **List Objects**
 ```rust
+// Follows pagination internally
 let objects = client.list_objects("bucket-name", Some("prefix/"), Some(100)).await?;
+
+// Or drive pagination yourself
+let page = client
+    .list_objects_page("bucket-name", Some("prefix/"), Some(500), None)
+    .await?;
+let next = page.next_continuation_token;
 ```
 
 ## Error Handling

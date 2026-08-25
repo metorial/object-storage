@@ -12,7 +12,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
-use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata, PublicUrlPurpose};
+use crate::backend::{
+    Backend, ByteStream, ObjectData, ObjectMetadata, ObjectPage, PublicUrlPurpose,
+};
 use crate::error::{BackendError, BackendResult};
 
 pub struct GcsBackend {
@@ -280,7 +282,8 @@ impl Backend for GcsBackend {
         &self,
         prefix: Option<&str>,
         max_keys: Option<usize>,
-    ) -> BackendResult<Vec<ObjectMetadata>> {
+        continuation_token: Option<&str>,
+    ) -> BackendResult<ObjectPage> {
         let mut request = ListObjectsRequest {
             bucket: self.bucket_name.clone(),
             ..Default::default()
@@ -294,8 +297,13 @@ impl Backend for GcsBackend {
             request.max_results = Some(max as i32);
         }
 
+        if let Some(token) = continuation_token {
+            request.page_token = Some(token.to_string());
+        }
+
         match self.client.list_objects(&request).await {
             Ok(response) => {
+                let next_continuation_token = response.next_page_token.clone();
                 let objects: Vec<ObjectMetadata> = response
                     .items
                     .unwrap_or_default()
@@ -318,7 +326,10 @@ impl Backend for GcsBackend {
                     prefix
                 );
 
-                Ok(objects)
+                Ok(ObjectPage {
+                    objects,
+                    next_continuation_token,
+                })
             }
             Err(e) => {
                 let error_msg = format!("{:?}", e);

@@ -33,6 +33,12 @@ pub struct ObjectData {
     pub stream: ByteStream,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ObjectPage {
+    pub objects: Vec<ObjectMetadata>,
+    pub next_continuation_token: Option<String>,
+}
+
 #[async_trait]
 pub trait Backend: Send + Sync {
     async fn init(&self) -> BackendResult<()>;
@@ -51,11 +57,35 @@ pub trait Backend: Send + Sync {
 
     async fn delete_object(&self, key: &str) -> BackendResult<()>;
 
+    async fn delete_objects(&self, keys: &[String]) -> BackendResult<Vec<BackendResult<()>>> {
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            results.push(self.delete_object(key).await);
+        }
+        Ok(results)
+    }
+
     async fn list_objects(
         &self,
         prefix: Option<&str>,
         max_keys: Option<usize>,
-    ) -> BackendResult<Vec<ObjectMetadata>>;
+        continuation_token: Option<&str>,
+    ) -> BackendResult<ObjectPage>;
+
+    async fn list_all_objects(&self, prefix: Option<&str>) -> BackendResult<Vec<ObjectMetadata>> {
+        let mut all = Vec::new();
+        let mut token: Option<String> = None;
+
+        loop {
+            let page = self.list_objects(prefix, None, token.as_deref()).await?;
+            all.extend(page.objects);
+
+            match page.next_continuation_token {
+                Some(next) => token = Some(next),
+                None => return Ok(all),
+            }
+        }
+    }
 
     async fn object_exists(&self, key: &str) -> BackendResult<bool> {
         match self.head_object(key).await {

@@ -9,7 +9,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
-use crate::backend::{Backend, ByteStream, ObjectData, ObjectMetadata, PublicUrlPurpose};
+use crate::backend::{
+    Backend, ByteStream, ObjectData, ObjectMetadata, ObjectPage, PublicUrlPurpose,
+};
 use crate::error::{BackendError, BackendResult};
 
 pub struct AzureBackend {
@@ -299,7 +301,8 @@ impl Backend for AzureBackend {
         &self,
         prefix: Option<&str>,
         max_keys: Option<usize>,
-    ) -> BackendResult<Vec<ObjectMetadata>> {
+        continuation_token: Option<&str>,
+    ) -> BackendResult<ObjectPage> {
         let mut request = self.client.list_blobs();
 
         if let Some(p) = prefix {
@@ -312,8 +315,17 @@ impl Backend for AzureBackend {
             }
         }
 
+        if let Some(token) = continuation_token {
+            request = request.marker(azure_core::prelude::NextMarker::from(token.to_string()));
+        }
+
         match request.into_stream().next().await {
             Some(Ok(response)) => {
+                let next_continuation_token = response
+                    .next_marker
+                    .as_ref()
+                    .map(|marker| marker.as_str().to_string());
+
                 let objects: Vec<ObjectMetadata> = response
                     .blobs
                     .items
@@ -346,7 +358,10 @@ impl Backend for AzureBackend {
                     prefix
                 );
 
-                Ok(objects)
+                Ok(ObjectPage {
+                    objects,
+                    next_continuation_token,
+                })
             }
             Some(Err(e)) => {
                 let error_msg = format!("{:?}", e);
@@ -363,7 +378,7 @@ impl Backend for AzureBackend {
                     )))
                 }
             }
-            None => Ok(Vec::new()),
+            None => Ok(ObjectPage::default()),
         }
     }
 

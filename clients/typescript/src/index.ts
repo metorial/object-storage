@@ -40,6 +40,24 @@ interface ListBucketsResponse {
 
 interface ListObjectsResponse {
   objects: ObjectMetadata[];
+  next_continuation_token?: string | null;
+}
+
+export interface ObjectPage {
+  objects: ObjectMetadata[];
+  nextContinuationToken?: string;
+}
+
+export interface DeleteObjectResult {
+  key: string;
+  deleted: boolean;
+  error?: string | null;
+}
+
+interface DeleteObjectsResponse {
+  results: DeleteObjectResult[];
+  deleted: number;
+  failed: number;
 }
 
 export enum PublicUrlPurpose {
@@ -246,11 +264,26 @@ export class ObjectStorageClient {
     }
   }
 
-  async listObjects(
+  async deleteObjects(bucket: string, keys: string[]): Promise<DeleteObjectResult[]> {
+    if (keys.length === 0) return [];
+
+    try {
+      const response = await this.client.post<DeleteObjectsResponse>(
+        `/buckets/${bucket}/objects/delete`,
+        { keys }
+      );
+      return response.data.results;
+    } catch (error) {
+      this.handleError(error as AxiosError);
+    }
+  }
+
+  async listObjectsPage(
     bucket: string,
     prefix?: string,
-    maxKeys?: number
-  ): Promise<ObjectMetadata[]> {
+    maxKeys?: number,
+    continuationToken?: string
+  ): Promise<ObjectPage> {
     try {
       const params: Record<string, string | number> = {};
 
@@ -260,14 +293,43 @@ export class ObjectStorageClient {
       if (maxKeys !== undefined) {
         params.max_keys = maxKeys;
       }
+      if (continuationToken !== undefined) {
+        params.continuation_token = continuationToken;
+      }
 
       const response = await this.client.get<ListObjectsResponse>(
         `/buckets/${bucket}/objects`,
         { params }
       );
-      return response.data.objects;
+
+      return {
+        objects: response.data.objects,
+        nextContinuationToken: response.data.next_continuation_token ?? undefined,
+      };
     } catch (error) {
       this.handleError(error as AxiosError);
+    }
+  }
+
+  async listObjects(
+    bucket: string,
+    prefix?: string,
+    maxKeys?: number
+  ): Promise<ObjectMetadata[]> {
+    let objects: ObjectMetadata[] = [];
+    let continuationToken: string | undefined;
+
+    for (;;) {
+      const page = await this.listObjectsPage(bucket, prefix, maxKeys, continuationToken);
+      objects = objects.concat(page.objects);
+
+      if (maxKeys !== undefined && objects.length >= maxKeys) {
+        return objects.slice(0, maxKeys);
+      }
+
+      if (!page.nextContinuationToken) return objects;
+
+      continuationToken = page.nextContinuationToken;
     }
   }
 

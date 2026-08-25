@@ -103,16 +103,31 @@ const metadata = await client.headObject('bucket-name', 'object-key');
 await client.deleteObject('bucket-name', 'object-key');
 ```
 
+**Delete Many Objects**
+```typescript
+const results = await client.deleteObjects('bucket-name', ['a.txt', 'b.txt']);
+for (const result of results) {
+  if (!result.deleted) console.log(`${result.key} failed: ${result.error}`);
+}
+```
+
 **List Objects**
 ```typescript
-// List all objects
+// List all objects, following pagination internally
 const objects = await client.listObjects('bucket-name');
 
 // List with prefix
 const objects = await client.listObjects('bucket-name', 'prefix/');
 
-// List with prefix and max keys
+// Stop after at most 100 objects
 const objects = await client.listObjects('bucket-name', 'prefix/', 100);
+
+// Drive pagination yourself
+let token: string | undefined;
+do {
+  const page = await client.listObjectsPage('bucket-name', 'prefix/', 500, token);
+  token = page.nextContinuationToken;
+} while (token);
 ```
 
 ## Error Handling

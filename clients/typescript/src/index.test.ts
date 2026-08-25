@@ -1,4 +1,5 @@
 import MockAdapter from 'axios-mock-adapter';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ObjectStorageClient, ObjectStorageError } from './index';
 
 describe('ObjectStorageClient', () => {
@@ -177,6 +178,80 @@ describe('ObjectStorageClient', () => {
 
       const objects = await client.listObjects('test-bucket');
       expect(objects).toHaveLength(0);
+    });
+
+    it('should follow continuation tokens until exhausted', async () => {
+      const seenTokens: (string | undefined)[] = [];
+
+      mock.onGet('/buckets/test-bucket/objects').reply(config => {
+        const token = config.params?.continuation_token;
+        seenTokens.push(token);
+
+        if (!token) {
+          return [200, { objects: [{ key: 'obj1' }], next_continuation_token: 'page-2' }];
+        }
+        if (token === 'page-2') {
+          return [200, { objects: [{ key: 'obj2' }], next_continuation_token: 'page-3' }];
+        }
+        return [200, { objects: [{ key: 'obj3' }], next_continuation_token: null }];
+      });
+
+      const objects = await client.listObjects('test-bucket');
+
+      expect(seenTokens).toEqual([undefined, 'page-2', 'page-3']);
+      expect(objects.map(o => o.key)).toEqual(['obj1', 'obj2', 'obj3']);
+    });
+
+    it('should stop paging once maxKeys is reached', async () => {
+      let calls = 0;
+
+      mock.onGet('/buckets/test-bucket/objects').reply(() => {
+        calls++;
+        return [
+          200,
+          {
+            objects: [{ key: 'obj1' }, { key: 'obj2' }, { key: 'obj3' }],
+            next_continuation_token: 'more',
+          },
+        ];
+      });
+
+      const objects = await client.listObjects('test-bucket', undefined, 2);
+
+      expect(calls).toBe(1);
+      expect(objects).toHaveLength(2);
+    });
+  });
+
+  describe('deleteObjects', () => {
+    it('should delete many objects and surface per-key results', async () => {
+      mock.onPost('/buckets/test-bucket/objects/delete').reply(config => {
+        expect(JSON.parse(config.data)).toEqual({ keys: ['a.txt', 'b.txt'] });
+
+        return [
+          200,
+          {
+            results: [
+              { key: 'a.txt', deleted: true, error: null },
+              { key: 'b.txt', deleted: false, error: 'boom' },
+            ],
+            deleted: 1,
+            failed: 1,
+          },
+        ];
+      });
+
+      const results = await client.deleteObjects('test-bucket', ['a.txt', 'b.txt']);
+
+      expect(results).toHaveLength(2);
+      expect(results[0].deleted).toBe(true);
+      expect(results[1].error).toBe('boom');
+    });
+
+    it('should not issue a request for an empty key list', async () => {
+      const results = await client.deleteObjects('test-bucket', []);
+      expect(results).toEqual([]);
+      expect(mock.history.post).toHaveLength(0);
     });
   });
 

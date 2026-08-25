@@ -251,6 +251,112 @@ func TestListObjectsNoParams(t *testing.T) {
 	assert.Empty(t, objects)
 }
 
+func TestListObjectsFollowsContinuationTokens(t *testing.T) {
+	var seenTokens []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.URL.Query().Get("continuation_token")
+		seenTokens = append(seenTokens, token)
+
+		w.WriteHeader(http.StatusOK)
+
+		switch token {
+		case "":
+			next := "page-2"
+			json.NewEncoder(w).Encode(listObjectsResponse{
+				Objects:               []ObjectMetadata{{Key: "obj1"}, {Key: "obj2"}},
+				NextContinuationToken: &next,
+			})
+		case "page-2":
+			next := "page-3"
+			json.NewEncoder(w).Encode(listObjectsResponse{
+				Objects:               []ObjectMetadata{{Key: "obj3"}},
+				NextContinuationToken: &next,
+			})
+		default:
+			json.NewEncoder(w).Encode(listObjectsResponse{
+				Objects: []ObjectMetadata{{Key: "obj4"}},
+			})
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	objects, err := client.ListObjects("test-bucket", nil, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"", "page-2", "page-3"}, seenTokens)
+	require.Len(t, objects, 4)
+	assert.Equal(t, "obj4", objects[3].Key)
+}
+
+func TestListObjectsStopsAtMaxKeys(t *testing.T) {
+	calls := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		next := "more"
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(listObjectsResponse{
+			Objects:               []ObjectMetadata{{Key: "obj1"}, {Key: "obj2"}, {Key: "obj3"}},
+			NextContinuationToken: &next,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	maxKeys := 2
+	objects, err := client.ListObjects("test-bucket", nil, &maxKeys)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, calls, "should not keep paging once the cap is reached")
+	assert.Len(t, objects, 2)
+}
+
+func TestDeleteObjects(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "POST", r.Method)
+		assert.Equal(t, "/buckets/test-bucket/objects/delete", r.URL.Path)
+
+		var req deleteObjectsRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		assert.Equal(t, []string{"a.txt", "b.txt"}, req.Keys)
+
+		failure := "boom"
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(deleteObjectsResponse{
+			Results: []DeleteObjectResult{
+				{Key: "a.txt", Deleted: true},
+				{Key: "b.txt", Deleted: false, Error: &failure},
+			},
+			Deleted: 1,
+			Failed:  1,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	results, err := client.DeleteObjects("test-bucket", []string{"a.txt", "b.txt"})
+	require.NoError(t, err)
+
+	require.Len(t, results, 2)
+	assert.True(t, results[0].Deleted)
+	assert.False(t, results[1].Deleted)
+	assert.Equal(t, "boom", *results[1].Error)
+}
+
+func TestDeleteObjectsEmptyIsNoop(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("no request expected for an empty key list")
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	results, err := client.DeleteObjects("test-bucket", nil)
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
 func TestGetPublicURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "GET", r.Method)
@@ -267,7 +373,7 @@ func TestGetPublicURL(t *testing.T) {
 
 	client := NewClient(server.URL)
 	expirationSecs := uint64(7200)
-	response, err := client.GetPublicURL("test-bucket", "test-key", &expirationSecs)
+	response, err := client.GetPublicURL("test-bucket", "test-key", &expirationSecs, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "https://example.com/signed-url?signature=abc123", response.URL)
 	assert.Equal(t, uint64(7200), response.ExpiresIn)
@@ -288,7 +394,7 @@ func TestGetPublicURLDefaultExpiration(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL)
-	response, err := client.GetPublicURL("test-bucket", "test-key", nil)
+	response, err := client.GetPublicURL("test-bucket", "test-key", nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "https://example.com/signed-url?signature=xyz789", response.URL)
 	assert.Equal(t, uint64(3600), response.ExpiresIn)
@@ -302,7 +408,7 @@ func TestGetPublicURLNotFound(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL)
-	_, err := client.GetPublicURL("test-bucket", "test-key", nil)
+	_, err := client.GetPublicURL("test-bucket", "test-key", nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Object not found")
 }

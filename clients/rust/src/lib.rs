@@ -60,6 +60,32 @@ struct ListBucketsResponse {
 #[derive(Debug, Deserialize)]
 struct ListObjectsResponse {
     objects: Vec<ObjectMetadata>,
+    #[serde(default)]
+    next_continuation_token: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectPage {
+    pub objects: Vec<ObjectMetadata>,
+    pub next_continuation_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DeleteObjectsRequest {
+    keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeleteObjectResult {
+    pub key: String,
+    pub deleted: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteObjectsResponse {
+    results: Vec<DeleteObjectResult>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -375,38 +401,103 @@ impl ObjectStoreClient {
         }
     }
 
+    pub async fn delete_objects(
+        &self,
+        bucket: &str,
+        keys: &[String],
+    ) -> Result<Vec<DeleteObjectResult>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let url = format!("{}/buckets/{}/objects/delete", self.base_url, bucket);
+        let response = self
+            .client
+            .post(&url)
+            .json(&DeleteObjectsRequest {
+                keys: keys.to_vec(),
+            })
+            .send()
+            .await?;
+
+        match response.status() {
+            StatusCode::OK => {
+                let resp: DeleteObjectsResponse = response.json().await?;
+                Ok(resp.results)
+            }
+            StatusCode::NOT_FOUND => Err(Error::NotFound(bucket.to_string())),
+            StatusCode::BAD_REQUEST => Err(Error::BadRequest(
+                response.text().await.unwrap_or_default(),
+            )),
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
+        }
+    }
+
+    pub async fn list_objects_page(
+        &self,
+        bucket: &str,
+        prefix: Option<&str>,
+        max_keys: Option<usize>,
+        continuation_token: Option<&str>,
+    ) -> Result<ObjectPage> {
+        let url = format!("{}/buckets/{}/objects", self.base_url, bucket);
+
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(p) = prefix {
+            params.push(("prefix", p.to_string()));
+        }
+        if let Some(m) = max_keys {
+            params.push(("max_keys", m.to_string()));
+        }
+        if let Some(t) = continuation_token {
+            params.push(("continuation_token", t.to_string()));
+        }
+
+        let response = self.client.get(&url).query(&params).send().await?;
+
+        match response.status() {
+            StatusCode::OK => {
+                let resp: ListObjectsResponse = response.json().await?;
+                Ok(ObjectPage {
+                    objects: resp.objects,
+                    next_continuation_token: resp.next_continuation_token,
+                })
+            }
+            StatusCode::NOT_FOUND => Err(Error::NotFound(bucket.to_string())),
+            _ => Err(Error::ServerError(
+                response.text().await.unwrap_or_default(),
+            )),
+        }
+    }
+
     pub async fn list_objects(
         &self,
         bucket: &str,
         prefix: Option<&str>,
         max_keys: Option<usize>,
     ) -> Result<Vec<ObjectMetadata>> {
-        let mut url = format!("{}/buckets/{}/objects", self.base_url, bucket);
-        let mut params = vec![];
+        let mut objects = Vec::new();
+        let mut token: Option<String> = None;
 
-        if let Some(p) = prefix {
-            params.push(format!("prefix={}", p));
-        }
-        if let Some(m) = max_keys {
-            params.push(format!("max_keys={}", m));
-        }
+        loop {
+            let page = self
+                .list_objects_page(bucket, prefix, max_keys, token.as_deref())
+                .await?;
+            objects.extend(page.objects);
 
-        if !params.is_empty() {
-            url.push('?');
-            url.push_str(&params.join("&"));
-        }
-
-        let response = self.client.get(&url).send().await?;
-
-        match response.status() {
-            StatusCode::OK => {
-                let resp: ListObjectsResponse = response.json().await?;
-                Ok(resp.objects)
+            if let Some(max) = max_keys {
+                if objects.len() >= max {
+                    objects.truncate(max);
+                    return Ok(objects);
+                }
             }
-            StatusCode::NOT_FOUND => Err(Error::NotFound(bucket.to_string())),
-            _ => Err(Error::ServerError(
-                response.text().await.unwrap_or_default(),
-            )),
+
+            match page.next_continuation_token {
+                Some(next) if !next.is_empty() => token = Some(next),
+                _ => return Ok(objects),
+            }
         }
     }
 

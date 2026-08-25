@@ -129,18 +129,38 @@ metadata, err := client.HeadObject("bucket-name", "object-key")
 err := client.DeleteObject("bucket-name", "object-key")
 ```
 
+**Delete Many Objects**
+```go
+results, err := client.DeleteObjects("bucket-name", []string{"a.txt", "b.txt"})
+for _, result := range results {
+    if !result.Deleted {
+        log.Printf("%s failed: %s", result.Key, *result.Error)
+    }
+}
+```
+
 **List Objects**
 ```go
-// List all objects
+// List all objects, following pagination internally
 objects, err := client.ListObjects("bucket-name", nil, nil)
 
 // List with prefix
 prefix := "prefix/"
 objects, err := client.ListObjects("bucket-name", &prefix, nil)
 
-// List with prefix and max keys
+// Stop after at most 100 objects
 maxKeys := 100
 objects, err := client.ListObjects("bucket-name", &prefix, &maxKeys)
+
+// Drive pagination yourself
+var token *string
+for {
+    page, err := client.ListObjectsPage("bucket-name", &prefix, nil, token)
+    if err != nil || page.NextContinuationToken == nil {
+        break
+    }
+    token = page.NextContinuationToken
+}
 ```
 
 ## Error Handling

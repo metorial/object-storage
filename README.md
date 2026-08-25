@@ -220,14 +220,44 @@ HEAD /buckets/{bucket}/objects/{key}
 DELETE /buckets/{bucket}/objects/{key}
 ```
 
+**Delete many objects:**
+```
+POST /buckets/{bucket}/objects/delete
+Content-Type: application/json
+
+{"keys": ["folder/a.txt", "folder/b.txt"]}
+```
+
+Returns one result per requested key, so partial failures stay visible:
+
+```json
+{
+  "results": [
+    { "key": "folder/a.txt", "deleted": true, "error": null },
+    { "key": "folder/b.txt", "deleted": false, "error": "..." }
+  ],
+  "deleted": 1,
+  "failed": 1
+}
+```
+
+Deleting a key that does not exist counts as deleted. Bucket marker keys
+(`.bucket`) are rejected.
+
 **List objects in a bucket:**
 ```
-GET /buckets/{bucket}/objects?prefix=folder/&max_keys=100
+GET /buckets/{bucket}/objects?prefix=folder/&max_keys=100&continuation_token=...
 ```
 
 Query parameters:
 - `prefix` (optional): Filter objects by prefix
-- `max_keys` (optional): Limit number of results
+- `max_keys` (optional): Maximum number of results in this page
+- `continuation_token` (optional): Token from a previous response's `next_continuation_token`
+
+The response carries `next_continuation_token` whenever more objects remain.
+Backends impose their own page limits (S3 caps a page at 1000 keys regardless of
+`max_keys`), so a listing is only complete once `next_continuation_token` is
+absent. The official clients loop over pages for you.
 
 ### Response Format
 

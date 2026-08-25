@@ -106,7 +106,7 @@ impl MetadataStore {
     }
 
     async fn load_buckets_from_backend(&self) -> ServiceResult<Vec<Bucket>> {
-        match self.backend.list_objects(Some(BUCKETS_PREFIX), None).await {
+        match self.backend.list_all_objects(Some(BUCKETS_PREFIX)).await {
             Ok(objects) => {
                 let mut buckets = Vec::new();
                 let mut errors = 0;
@@ -440,7 +440,7 @@ impl MetadataStore {
         let now = Utc::now();
         let mut cleaned = 0u64;
 
-        match self.backend.list_objects(Some(LOCKS_PREFIX), None).await {
+        match self.backend.list_all_objects(Some(LOCKS_PREFIX)).await {
             Ok(objects) => {
                 for obj in objects {
                     // Try to read lock and check expiration
