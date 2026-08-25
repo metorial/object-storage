@@ -305,7 +305,10 @@ impl Backend for GcsBackend {
                 if error_msg.contains("404") || error_msg.contains("NotFound") {
                     Err(BackendError::NotFound(source_key.to_string()))
                 } else {
-                    warn!("Failed to copy object in GCS: {} -> {}: {:?}", source_key, dest_key, e);
+                    warn!(
+                        "Failed to copy object in GCS: {} -> {}: {:?}",
+                        source_key, dest_key, e
+                    );
                     Err(BackendError::Provider(format!(
                         "Failed to copy object '{}' to '{}': {}",
                         source_key, dest_key, e
