@@ -2,14 +2,20 @@ package objectstorage
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
+
+const customMetadataHeaderPrefix = "X-Object-Meta-"
+
+const maxErrorBodyBytes = 8 * 1024
 
 type Client struct {
 	baseURL    string
@@ -34,6 +40,13 @@ type ObjectMetadata struct {
 type ObjectData struct {
 	Metadata ObjectMetadata
 	Data     []byte
+}
+
+// ObjectStream is an object being read directly from the store rather than
+// buffered. The caller owns Body and must close it.
+type ObjectStream struct {
+	Metadata ObjectMetadata
+	Body     io.ReadCloser
 }
 
 type createBucketRequest struct {
@@ -347,36 +360,115 @@ func (c *Client) GetObject(bucket, key string) (*ObjectData, error) {
 		return nil, err
 	}
 
-	size, _ := strconv.ParseUint(resp.Header.Get("Content-Length"), 10, 64)
-	contentType := resp.Header.Get("Content-Type")
-	var ct *string
-	if contentType != "" {
-		ct = &contentType
+	return &ObjectData{
+		Metadata: objectMetadataFromHeaders(key, resp.Header),
+		Data:     data,
+	}, nil
+}
+
+func (c *Client) GetObjectStream(ctx context.Context, bucket, key string) (*ObjectStream, error) {
+	urlPath := fmt.Sprintf("%s/buckets/%s/objects/%s", c.baseURL, bucket, key)
+	req, err := http.NewRequestWithContext(ctx, "GET", urlPath, nil)
+	if err != nil {
+		return nil, err
 	}
 
-	// Extract custom metadata from x-object-meta-* headers
-	metadata := make(map[string]string)
-	for headerName, headerValues := range resp.Header {
-		if len(headerValues) > 0 {
-			const prefix = "X-Object-Meta-"
-			if len(headerName) > len(prefix) && headerName[:len(prefix)] == prefix {
-				metaKey := headerName[len(prefix):]
-				metadata[metaKey] = headerValues[0]
-			}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		return nil, &Error{
+			StatusCode: resp.StatusCode,
+			Message:    string(bodyBytes),
 		}
 	}
 
-	return &ObjectData{
-		Metadata: ObjectMetadata{
-			Key:          key,
-			Size:         size,
-			ContentType:  ct,
-			ETag:         resp.Header.Get("ETag"),
-			LastModified: resp.Header.Get("Last-Modified"),
-			Metadata:     metadata,
-		},
-		Data: data,
+	return &ObjectStream{
+		Metadata: objectMetadataFromHeaders(key, resp.Header),
+		Body:     resp.Body,
 	}, nil
+}
+
+func (c *Client) PutObjectFromReader(
+	ctx context.Context,
+	bucket, key string,
+	body io.Reader,
+	size int64,
+	contentType *string,
+	metadata map[string]string,
+) (*ObjectMetadata, error) {
+	urlPath := fmt.Sprintf("%s/buckets/%s/objects/%s", c.baseURL, bucket, key)
+	req, err := http.NewRequestWithContext(ctx, "PUT", urlPath, body)
+	if err != nil {
+		return nil, err
+	}
+
+	if size >= 0 {
+		req.ContentLength = size
+	}
+
+	if contentType != nil {
+		req.Header.Set("Content-Type", *contentType)
+	}
+
+	for k, v := range metadata {
+		req.Header.Set("x-object-meta-"+k, v)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		return nil, &Error{
+			StatusCode: resp.StatusCode,
+			Message:    string(bodyBytes),
+		}
+	}
+
+	var objMetadata ObjectMetadata
+	if err := json.NewDecoder(resp.Body).Decode(&objMetadata); err != nil {
+		return nil, err
+	}
+
+	return &objMetadata, nil
+}
+
+func objectMetadataFromHeaders(key string, header http.Header) ObjectMetadata {
+	size, _ := strconv.ParseUint(header.Get("Content-Length"), 10, 64)
+
+	var contentType *string
+	if value := header.Get("Content-Type"); value != "" {
+		contentType = &value
+	}
+
+	metadata := make(map[string]string)
+	for headerName, headerValues := range header {
+		if len(headerValues) == 0 {
+			continue
+		}
+
+		if metaKey, ok := strings.CutPrefix(headerName, customMetadataHeaderPrefix); ok {
+			metadata[metaKey] = headerValues[0]
+		}
+	}
+
+	return ObjectMetadata{
+		Key:          key,
+		Size:         size,
+		ContentType:  contentType,
+		ETag:         header.Get("ETag"),
+		LastModified: header.Get("Last-Modified"),
+		Metadata:     metadata,
+	}
 }
 
 func (c *Client) HeadObject(bucket, key string) (*ObjectMetadata, error) {
@@ -399,33 +491,8 @@ func (c *Client) HeadObject(bucket, key string) (*ObjectMetadata, error) {
 		}
 	}
 
-	size, _ := strconv.ParseUint(resp.Header.Get("Content-Length"), 10, 64)
-	contentType := resp.Header.Get("Content-Type")
-	var ct *string
-	if contentType != "" {
-		ct = &contentType
-	}
-
-	// Extract custom metadata from x-object-meta-* headers
-	metadata := make(map[string]string)
-	for headerName, headerValues := range resp.Header {
-		if len(headerValues) > 0 {
-			const prefix = "X-Object-Meta-"
-			if len(headerName) > len(prefix) && headerName[:len(prefix)] == prefix {
-				metaKey := headerName[len(prefix):]
-				metadata[metaKey] = headerValues[0]
-			}
-		}
-	}
-
-	return &ObjectMetadata{
-		Key:          key,
-		Size:         size,
-		ContentType:  ct,
-		ETag:         resp.Header.Get("ETag"),
-		LastModified: resp.Header.Get("Last-Modified"),
-		Metadata:     metadata,
-	}, nil
+	metadata := objectMetadataFromHeaders(key, resp.Header)
+	return &metadata, nil
 }
 
 func (c *Client) GetObjectInfo(bucket, key string) (*ObjectMetadata, error) {

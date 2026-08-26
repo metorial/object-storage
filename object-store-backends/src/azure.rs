@@ -5,7 +5,6 @@ use azure_storage_blobs::prelude::*;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
@@ -13,6 +12,7 @@ use crate::backend::{
     Backend, ByteStream, ObjectData, ObjectMetadata, ObjectPage, PublicUrlPurpose,
 };
 use crate::error::{BackendError, BackendResult};
+use crate::upload::{ChunkedUpload, MULTIPART_PART_SIZE, SINGLE_REQUEST_THRESHOLD};
 
 pub struct AzureBackend {
     client: ContainerClient,
@@ -116,6 +116,73 @@ impl AzureBackend {
             custom_metadata: metadata,
         }
     }
+
+    async fn put_object_blocks(
+        &self,
+        key: &str,
+        mut upload: ChunkedUpload,
+        content_type: Option<String>,
+        custom_metadata: HashMap<String, String>,
+        metadata_obj: azure_core::request_options::Metadata,
+    ) -> BackendResult<ObjectMetadata> {
+        let blob_client = self.client.blob_client(key);
+        let mut block_list = BlockList::default();
+
+        loop {
+            let block = upload.next_part(MULTIPART_PART_SIZE).await?;
+            if block.is_empty() {
+                break;
+            }
+
+            let block_id = format!("{:08}", block_list.blocks.len());
+
+            blob_client
+                .put_block(block_id.clone(), block)
+                .await
+                .map_err(|e| {
+                    warn!("Failed to stage block {} of {}: {:?}", block_id, key, e);
+                    BackendError::Provider(format!(
+                        "Failed to stage block {} of '{}': {}",
+                        block_id, key, e
+                    ))
+                })?;
+
+            block_list
+                .blocks
+                .push(BlobBlockType::new_uncommitted(block_id));
+        }
+
+        let mut request = blob_client
+            .put_block_list(block_list)
+            .metadata(metadata_obj);
+
+        if let Some(ct) = content_type.as_ref() {
+            request = request.content_type(ct.clone());
+        }
+
+        match request.await {
+            Ok(_) => {
+                let size = upload.total_size();
+                debug!("Uploaded blob to Azure in blocks: {} ({} bytes)", key, size);
+
+                Ok(ObjectMetadata {
+                    key: key.to_string(),
+                    size,
+                    content_type,
+                    last_modified: Utc::now(),
+                    etag: upload.etag(),
+                    custom_metadata,
+                })
+            }
+            Err(e) => {
+                warn!("Failed to commit blocks for Azure blob {}: {:?}", key, e);
+                Err(BackendError::Provider(format!(
+                    "Failed to commit blocks for blob '{}': {}",
+                    key, e
+                )))
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -142,45 +209,41 @@ impl Backend for AzureBackend {
     async fn put_object(
         &self,
         key: &str,
-        mut stream: ByteStream,
+        stream: ByteStream,
         content_type: Option<String>,
         custom_metadata: HashMap<String, String>,
     ) -> BackendResult<ObjectMetadata> {
         let blob_client = self.client.blob_client(key);
 
-        // Collect stream into bytes while computing hash
-        let mut hasher = Sha256::new();
-        let mut data = Vec::new();
-
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result
-                .map_err(|e| BackendError::Provider(format!("Failed to read stream: {}", e)))?;
-
-            hasher.update(&chunk);
-            data.extend_from_slice(&chunk);
-        }
-
-        let size = data.len();
-        let etag = hex::encode(hasher.finalize());
-
-        let mut request = blob_client.put_block_blob(data);
-
-        if let Some(ct) = content_type.as_ref() {
-            request = request.content_type(ct.clone());
-        }
-
         let mut metadata_obj = azure_core::request_options::Metadata::new();
         for (k, v) in custom_metadata.iter() {
             metadata_obj.insert(k.clone(), v.clone());
         }
-        request = request.metadata(metadata_obj);
+
+        let mut upload = ChunkedUpload::new(stream);
+
+        if !upload.fits_within(SINGLE_REQUEST_THRESHOLD).await? {
+            return self
+                .put_object_blocks(key, upload, content_type, custom_metadata, metadata_obj)
+                .await;
+        }
+
+        let data = upload.take_buffered();
+        let size = data.len() as u64;
+        let etag = upload.etag();
+
+        let mut request = blob_client.put_block_blob(data).metadata(metadata_obj);
+
+        if let Some(ct) = content_type.as_ref() {
+            request = request.content_type(ct.clone());
+        }
 
         match request.await {
             Ok(_) => {
                 debug!("Uploaded blob to Azure: {} ({} bytes)", key, size);
                 Ok(ObjectMetadata {
                     key: key.to_string(),
-                    size: size as u64,
+                    size,
                     content_type,
                     last_modified: Utc::now(),
                     etag,

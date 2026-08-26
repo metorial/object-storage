@@ -1,10 +1,14 @@
 package objectstorage
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -448,6 +452,167 @@ func TestGetPublicURLNotFound(t *testing.T) {
 	_, err := client.GetPublicURL("test-bucket", "test-key", nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Object not found")
+}
+
+func TestGetObjectStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "GET", r.Method)
+		assert.Equal(t, "/buckets/test-bucket/objects/test-key", r.URL.Path)
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("ETag", "etag-123")
+		w.Header().Set("x-object-meta-author", "tobias")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("streamed content"))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	stream, err := client.GetObjectStream(context.Background(), "test-bucket", "test-key")
+	require.NoError(t, err)
+	defer stream.Body.Close()
+
+	assert.Equal(t, "etag-123", stream.Metadata.ETag)
+	assert.Equal(t, "application/octet-stream", *stream.Metadata.ContentType)
+	assert.Equal(t, "tobias", stream.Metadata.Metadata["Author"])
+
+	body, err := io.ReadAll(stream.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "streamed content", string(body))
+}
+
+func TestGetObjectStreamNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("Object not found"))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	stream, err := client.GetObjectStream(context.Background(), "test-bucket", "missing")
+	require.Error(t, err)
+	assert.Nil(t, stream)
+	assert.Contains(t, err.Error(), "Object not found")
+}
+
+func TestGetObjectStreamDoesNotBufferTheBody(t *testing.T) {
+	// The handler blocks after the first chunk. A client that buffered the body
+	// before returning would deadlock here rather than hand back a reader.
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("first"))
+		w.(http.Flusher).Flush()
+		<-release
+		w.Write([]byte("second"))
+	}))
+	defer server.Close()
+	defer close(release)
+
+	client := NewClient(server.URL)
+	stream, err := client.GetObjectStream(context.Background(), "test-bucket", "test-key")
+	require.NoError(t, err)
+	defer stream.Body.Close()
+
+	first := make([]byte, 5)
+	_, err = io.ReadFull(stream.Body, first)
+	require.NoError(t, err)
+	assert.Equal(t, "first", string(first))
+}
+
+func TestGetObjectStreamHonoursContextCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	client := NewClient(server.URL)
+	_, err := client.GetObjectStream(ctx, "test-bucket", "test-key")
+	require.Error(t, err)
+}
+
+func TestPutObjectFromReader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "PUT", r.Method)
+		assert.Equal(t, "/buckets/test-bucket/objects/test-key", r.URL.Path)
+		assert.Equal(t, "text/plain", r.Header.Get("Content-Type"))
+		assert.Equal(t, "tobias", r.Header.Get("x-object-meta-author"))
+
+		assert.Equal(t, int64(11), r.ContentLength)
+
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Equal(t, "hello world", string(body))
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(ObjectMetadata{Key: "test-key", Size: 11, ETag: "etag-123"})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	metadata, err := client.PutObjectFromReader(
+		context.Background(),
+		"test-bucket",
+		"test-key",
+		strings.NewReader("hello world"),
+		11,
+		stringPtr("text/plain"),
+		map[string]string{"author": "tobias"},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(11), metadata.Size)
+	assert.Equal(t, "etag-123", metadata.ETag)
+}
+
+func TestPutObjectFromReaderWithUnknownSize(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, int64(-1), r.ContentLength)
+
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Equal(t, "hello world", string(body))
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(ObjectMetadata{Key: "test-key", Size: 11})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	_, err := client.PutObjectFromReader(
+		context.Background(),
+		"test-bucket",
+		"test-key",
+		iotest.OneByteReader(strings.NewReader("hello world")),
+		-1,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+}
+
+func TestPutObjectFromReaderSurfacesErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusInsufficientStorage)
+		w.Write([]byte("out of space"))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	_, err := client.PutObjectFromReader(
+		context.Background(),
+		"test-bucket",
+		"test-key",
+		strings.NewReader("hello"),
+		5,
+		nil,
+		nil,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "out of space")
 }
 
 func stringPtr(s string) *string {

@@ -4,6 +4,7 @@ use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream as AwsByteStream;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
@@ -16,6 +17,9 @@ use crate::backend::{
     Backend, ByteStream, ObjectData, ObjectMetadata, ObjectPage, PublicUrlPurpose,
 };
 use crate::error::{BackendError, BackendResult};
+use crate::upload::{
+    ChunkedUpload, MAX_MULTIPART_PARTS, MULTIPART_PART_SIZE, SINGLE_REQUEST_THRESHOLD,
+};
 
 pub struct S3Backend {
     client: Client,
@@ -84,6 +88,157 @@ impl S3Backend {
             custom_metadata: metadata,
         }
     }
+
+    async fn put_object_multipart(
+        &self,
+        key: &str,
+        mut upload: ChunkedUpload,
+        content_type: Option<String>,
+        custom_metadata: HashMap<String, String>,
+    ) -> BackendResult<ObjectMetadata> {
+        let mut create = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket_name)
+            .key(key);
+
+        if let Some(ct) = content_type.as_ref() {
+            create = create.content_type(ct);
+        }
+
+        for (k, v) in custom_metadata.iter() {
+            create = create.metadata(k.clone(), v.clone());
+        }
+
+        let created = create.send().await.map_err(|e| {
+            warn!("Failed to start multipart upload to S3: {}: {:?}", key, e);
+            BackendError::Provider(format!("Failed to start upload of '{}': {}", key, e))
+        })?;
+
+        let upload_id = created.upload_id().ok_or_else(|| {
+            BackendError::Provider(format!("S3 returned no upload id for '{}'", key))
+        })?;
+
+        let parts = match self.upload_parts(key, upload_id, &mut upload).await {
+            Ok(parts) => parts,
+            Err(e) => {
+                self.abort_multipart_upload(key, upload_id).await;
+                return Err(e);
+            }
+        };
+
+        let completed = CompletedMultipartUpload::builder()
+            .set_parts(Some(parts))
+            .build();
+
+        match self
+            .client
+            .complete_multipart_upload()
+            .bucket(&self.bucket_name)
+            .key(key)
+            .upload_id(upload_id)
+            .multipart_upload(completed)
+            .send()
+            .await
+        {
+            Ok(output) => {
+                let size = upload.total_size();
+                debug!("Uploaded object to S3 in parts: {} ({} bytes)", key, size);
+
+                Ok(ObjectMetadata {
+                    key: key.to_string(),
+                    size,
+                    content_type,
+                    last_modified: Utc::now(),
+                    etag: output
+                        .e_tag()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| upload.etag()),
+                    custom_metadata,
+                })
+            }
+            Err(e) => {
+                self.abort_multipart_upload(key, upload_id).await;
+                warn!(
+                    "Failed to complete multipart upload to S3: {}: {:?}",
+                    key, e
+                );
+                Err(BackendError::Provider(format!(
+                    "Failed to complete upload of '{}': {}",
+                    key, e
+                )))
+            }
+        }
+    }
+
+    async fn upload_parts(
+        &self,
+        key: &str,
+        upload_id: &str,
+        upload: &mut ChunkedUpload,
+    ) -> BackendResult<Vec<CompletedPart>> {
+        let mut parts: Vec<CompletedPart> = Vec::new();
+
+        loop {
+            let part = upload.next_part(MULTIPART_PART_SIZE).await?;
+            if part.is_empty() {
+                return Ok(parts);
+            }
+
+            if parts.len() >= MAX_MULTIPART_PARTS {
+                return Err(BackendError::Provider(format!(
+                    "Object '{}' is larger than the {} byte upload limit",
+                    key,
+                    MAX_MULTIPART_PARTS * MULTIPART_PART_SIZE
+                )));
+            }
+
+            // Part numbers are 1-based and have to be contiguous.
+            let part_number = parts.len() as i32 + 1;
+
+            let output = self
+                .client
+                .upload_part()
+                .bucket(&self.bucket_name)
+                .key(key)
+                .upload_id(upload_id)
+                .part_number(part_number)
+                .body(AwsByteStream::from(part))
+                .send()
+                .await
+                .map_err(|e| {
+                    warn!(
+                        "Failed to upload part {} of {} to S3: {:?}",
+                        part_number, key, e
+                    );
+                    BackendError::Provider(format!(
+                        "Failed to upload part {} of '{}': {}",
+                        part_number, key, e
+                    ))
+                })?;
+
+            parts.push(
+                CompletedPart::builder()
+                    .set_e_tag(output.e_tag().map(|s| s.to_string()))
+                    .part_number(part_number)
+                    .build(),
+            );
+        }
+    }
+
+    async fn abort_multipart_upload(&self, key: &str, upload_id: &str) {
+        if let Err(e) = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.bucket_name)
+            .key(key)
+            .upload_id(upload_id)
+            .send()
+            .await
+        {
+            warn!("Failed to abort multipart upload for {}: {:?}", key, e);
+        }
+    }
 }
 
 #[async_trait]
@@ -113,65 +268,56 @@ impl Backend for S3Backend {
     async fn put_object(
         &self,
         key: &str,
-        mut stream: ByteStream,
+        stream: ByteStream,
         content_type: Option<String>,
         custom_metadata: HashMap<String, String>,
     ) -> BackendResult<ObjectMetadata> {
-        use sha2::{Digest, Sha256};
+        let mut upload = ChunkedUpload::new(stream);
 
-        // Collect stream into bytes while computing hash
-        let mut hasher = Sha256::new();
-        let mut data = Vec::new();
+        if upload.fits_within(SINGLE_REQUEST_THRESHOLD).await? {
+            let data = upload.take_buffered();
+            let size = data.len() as u64;
+            let etag = upload.etag();
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result
-                .map_err(|e| BackendError::Provider(format!("Failed to read stream: {}", e)))?;
+            let mut request = self
+                .client
+                .put_object()
+                .bucket(&self.bucket_name)
+                .key(key)
+                .body(AwsByteStream::from(data));
 
-            hasher.update(&chunk);
-            data.extend_from_slice(&chunk);
-        }
-
-        let size = data.len();
-        let etag = hex::encode(hasher.finalize());
-
-        // Convert to AWS ByteStream
-        let body = AwsByteStream::from(data);
-
-        let mut request = self
-            .client
-            .put_object()
-            .bucket(&self.bucket_name)
-            .key(key)
-            .body(body);
-
-        if let Some(ct) = content_type.as_ref() {
-            request = request.content_type(ct);
-        }
-
-        for (k, v) in custom_metadata.iter() {
-            request = request.metadata(k.clone(), v.clone());
-        }
-
-        match request.send().await {
-            Ok(output) => {
-                debug!("Uploaded object to S3: {} ({} bytes)", key, size);
-                Ok(ObjectMetadata {
-                    key: key.to_string(),
-                    size: size as u64,
-                    content_type,
-                    last_modified: Utc::now(),
-                    etag: output.e_tag().map(|s| s.to_string()).unwrap_or(etag),
-                    custom_metadata,
-                })
+            if let Some(ct) = content_type.as_ref() {
+                request = request.content_type(ct);
             }
-            Err(e) => {
-                warn!("Failed to upload object to S3: {}: {:?}", key, e);
-                Err(BackendError::Provider(format!(
-                    "Failed to upload object '{}': {}",
-                    key, e
-                )))
+
+            for (k, v) in custom_metadata.iter() {
+                request = request.metadata(k.clone(), v.clone());
             }
+
+            return match request.send().await {
+                Ok(output) => {
+                    debug!("Uploaded object to S3: {} ({} bytes)", key, size);
+                    Ok(ObjectMetadata {
+                        key: key.to_string(),
+                        size,
+                        content_type,
+                        last_modified: Utc::now(),
+                        etag: output.e_tag().map(|s| s.to_string()).unwrap_or(etag),
+                        custom_metadata,
+                    })
+                }
+                Err(e) => {
+                    warn!("Failed to upload object to S3: {}: {:?}", key, e);
+                    Err(BackendError::Provider(format!(
+                        "Failed to upload object '{}': {}",
+                        key, e
+                    )))
+                }
+            };
         }
+
+        self.put_object_multipart(key, upload, content_type, custom_metadata)
+            .await
     }
 
     async fn get_object(&self, key: &str) -> BackendResult<ObjectData> {
@@ -200,7 +346,6 @@ impl Backend for S3Backend {
 
                 debug!("Retrieved object from S3: {} ({} bytes)", key, size);
 
-                // Convert AWS ByteStream to our ByteStream via AsyncRead
                 let async_read = output.body.into_async_read();
                 let stream: ByteStream = Box::pin(
                     ReaderStream::new(async_read)

@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
 use google_cloud_storage::client::{Client, ClientConfig};
 use google_cloud_storage::http::objects::copy::CopyObjectRequest;
 use google_cloud_storage::http::objects::delete::DeleteObjectRequest;
@@ -9,7 +8,6 @@ use google_cloud_storage::http::objects::download::Range;
 use google_cloud_storage::http::objects::get::GetObjectRequest;
 use google_cloud_storage::http::objects::list::ListObjectsRequest;
 use google_cloud_storage::http::objects::upload::{Media, UploadObjectRequest, UploadType};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
@@ -17,6 +15,7 @@ use crate::backend::{
     Backend, ByteStream, ObjectData, ObjectMetadata, ObjectPage, PublicUrlPurpose,
 };
 use crate::error::{BackendError, BackendResult};
+use crate::upload::{into_sync_stream, ChunkedUpload, SINGLE_REQUEST_THRESHOLD};
 
 pub struct GcsBackend {
     client: Client,
@@ -124,25 +123,11 @@ impl Backend for GcsBackend {
     async fn put_object(
         &self,
         key: &str,
-        mut stream: ByteStream,
+        stream: ByteStream,
         content_type: Option<String>,
         custom_metadata: HashMap<String, String>,
     ) -> BackendResult<ObjectMetadata> {
         let key_owned = key.to_string();
-
-        // Collect stream into bytes while computing hash
-        let mut hasher = Sha256::new();
-        let mut data = Vec::new();
-
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result
-                .map_err(|e| BackendError::Provider(format!("Failed to read stream: {}", e)))?;
-
-            hasher.update(&chunk);
-            data.extend_from_slice(&chunk);
-        }
-
-        let size = data.len();
 
         let upload_type = UploadType::Simple(Media::new(key_owned.clone()));
         let request = UploadObjectRequest {
@@ -150,13 +135,30 @@ impl Backend for GcsBackend {
             ..Default::default()
         };
 
-        match self
-            .client
-            .upload_object(&request, data, &upload_type)
-            .await
-        {
+        let mut upload = ChunkedUpload::new(stream);
+
+        let result = if upload.fits_within(SINGLE_REQUEST_THRESHOLD).await? {
+            let data = upload.take_buffered();
+            debug!("Uploading object to GCS: {} ({} bytes)", key, data.len());
+
+            self.client
+                .upload_object(&request, data, &upload_type)
+                .await
+        } else {
+            debug!("Uploading object to GCS as a stream: {}", key);
+
+            self.client
+                .upload_streamed_object(
+                    &request,
+                    into_sync_stream(upload.into_stream()),
+                    &upload_type,
+                )
+                .await
+        };
+
+        match result {
             Ok(object) => {
-                debug!("Uploaded object to GCS: {} ({} bytes)", key, size);
+                debug!("Uploaded object to GCS: {} ({} bytes)", key, object.size);
                 Ok(Self::gcs_metadata_to_object_metadata(
                     object.name,
                     object.size,
