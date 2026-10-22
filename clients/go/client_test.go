@@ -162,6 +162,57 @@ func TestGetObject(t *testing.T) {
 	assert.Equal(t, []byte("Hello, World!"), obj.Data)
 }
 
+func TestEscapeObjectKey(t *testing.T) {
+	assert.Equal(t, "dir/sub/file.txt", EscapeObjectKey("dir/sub/file.txt"))
+	assert.Equal(t, "dir/notes%231.md", EscapeObjectKey("dir/notes#1.md"))
+	assert.Equal(t, "100%25.md", EscapeObjectKey("100%.md"))
+	assert.Equal(t, "a%3Fb%20c.md", EscapeObjectKey("a?b c.md"))
+	assert.Equal(t, "r%C3%A9sum%C3%A9.md", EscapeObjectKey("résumé.md"))
+}
+
+func TestObjectKeysReachTheServerVerbatim(t *testing.T) {
+	keys := []string{
+		"bucket-1/notes#1.md",
+		"bucket-1/100%.md",
+		"bucket-1/a%41.md",
+		"bucket-1/what?.md",
+		"bucket-1/日本語/🚀 launch.md",
+		"bucket-1/a&b+c;d=e.md",
+	}
+
+	var received []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = append(received, r.Method+" "+r.URL.Path)
+		switch r.Method {
+		case "PUT":
+			json.NewEncoder(w).Encode(ObjectMetadata{Key: "k"})
+		case "DELETE":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	var expected []string
+	for _, key := range keys {
+		_, err := client.PutObject("files", key, []byte("x"), nil, nil)
+		require.NoError(t, err)
+		_, err = client.GetObject("files", key)
+		require.NoError(t, err)
+		_, err = client.HeadObject("files", key)
+		require.NoError(t, err)
+		require.NoError(t, client.DeleteObject("files", key))
+
+		path := "/buckets/files/objects/" + key
+		expected = append(expected, "PUT "+path, "GET "+path, "HEAD "+path, "DELETE "+path)
+	}
+
+	assert.Equal(t, expected, received)
+}
+
 func TestGetObjectNotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

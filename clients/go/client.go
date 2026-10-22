@@ -125,6 +125,20 @@ func NewClientWithHTTP(baseURL string, httpClient *http.Client) *Client {
 	}
 }
 
+// EscapeObjectKey percent-encodes each segment of an object key so characters such as '#', '?'
+// and '%' reach the server as part of the key instead of being parsed as URL syntax.
+func EscapeObjectKey(key string) string {
+	segments := strings.Split(key, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
+}
+
+func (c *Client) objectURL(route, bucket, key string) string {
+	return fmt.Sprintf("%s/buckets/%s/%s/%s", c.baseURL, url.PathEscape(bucket), route, EscapeObjectKey(key))
+}
+
 func (c *Client) Ping() error {
 	req, err := http.NewRequest("GET", c.baseURL+"/ping", nil)
 	if err != nil {
@@ -298,7 +312,7 @@ func (c *Client) DeleteBucket(name string) error {
 }
 
 func (c *Client) PutObject(bucket, key string, data []byte, contentType *string, metadata map[string]string) (*ObjectMetadata, error) {
-	urlPath := fmt.Sprintf("%s/buckets/%s/objects/%s", c.baseURL, bucket, key)
+	urlPath := c.objectURL("objects", bucket, key)
 	req, err := http.NewRequest("PUT", urlPath, bytes.NewReader(data))
 	if err != nil {
 		return nil, err
@@ -335,7 +349,7 @@ func (c *Client) PutObject(bucket, key string, data []byte, contentType *string,
 }
 
 func (c *Client) GetObject(bucket, key string) (*ObjectData, error) {
-	urlPath := fmt.Sprintf("%s/buckets/%s/objects/%s", c.baseURL, bucket, key)
+	urlPath := c.objectURL("objects", bucket, key)
 	req, err := http.NewRequest("GET", urlPath, nil)
 	if err != nil {
 		return nil, err
@@ -367,7 +381,7 @@ func (c *Client) GetObject(bucket, key string) (*ObjectData, error) {
 }
 
 func (c *Client) GetObjectStream(ctx context.Context, bucket, key string) (*ObjectStream, error) {
-	urlPath := fmt.Sprintf("%s/buckets/%s/objects/%s", c.baseURL, bucket, key)
+	urlPath := c.objectURL("objects", bucket, key)
 	req, err := http.NewRequestWithContext(ctx, "GET", urlPath, nil)
 	if err != nil {
 		return nil, err
@@ -402,7 +416,7 @@ func (c *Client) PutObjectFromReader(
 	contentType *string,
 	metadata map[string]string,
 ) (*ObjectMetadata, error) {
-	urlPath := fmt.Sprintf("%s/buckets/%s/objects/%s", c.baseURL, bucket, key)
+	urlPath := c.objectURL("objects", bucket, key)
 	req, err := http.NewRequestWithContext(ctx, "PUT", urlPath, body)
 	if err != nil {
 		return nil, err
@@ -472,7 +486,7 @@ func objectMetadataFromHeaders(key string, header http.Header) ObjectMetadata {
 }
 
 func (c *Client) HeadObject(bucket, key string) (*ObjectMetadata, error) {
-	urlPath := fmt.Sprintf("%s/buckets/%s/objects/%s", c.baseURL, bucket, key)
+	urlPath := c.objectURL("objects", bucket, key)
 	req, err := http.NewRequest("HEAD", urlPath, nil)
 	if err != nil {
 		return nil, err
@@ -496,7 +510,7 @@ func (c *Client) HeadObject(bucket, key string) (*ObjectMetadata, error) {
 }
 
 func (c *Client) GetObjectInfo(bucket, key string) (*ObjectMetadata, error) {
-	urlPath := fmt.Sprintf("%s/buckets/%s/object-info/%s", c.baseURL, bucket, key)
+	urlPath := c.objectURL("object-info", bucket, key)
 	req, err := http.NewRequest("GET", urlPath, nil)
 	if err != nil {
 		return nil, err
@@ -525,7 +539,7 @@ func (c *Client) GetObjectInfo(bucket, key string) (*ObjectMetadata, error) {
 }
 
 func (c *Client) DeleteObject(bucket, key string) error {
-	urlPath := fmt.Sprintf("%s/buckets/%s/objects/%s", c.baseURL, bucket, key)
+	urlPath := c.objectURL("objects", bucket, key)
 	req, err := http.NewRequest("DELETE", urlPath, nil)
 	if err != nil {
 		return err
@@ -558,7 +572,7 @@ func (c *Client) DeleteObjects(bucket string, keys []string) ([]DeleteObjectResu
 		return nil, err
 	}
 
-	urlPath := fmt.Sprintf("%s/buckets/%s/objects/delete", c.baseURL, bucket)
+	urlPath := fmt.Sprintf("%s/buckets/%s/objects/delete", c.baseURL, url.PathEscape(bucket))
 	req, err := http.NewRequest("POST", urlPath, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -596,7 +610,7 @@ func (c *Client) CopyObject(bucket, key, sourceBucket, sourceKey string) (*Objec
 		return nil, err
 	}
 
-	urlPath := fmt.Sprintf("%s/buckets/%s/copy-object/%s", c.baseURL, bucket, key)
+	urlPath := c.objectURL("copy-object", bucket, key)
 	req, err := http.NewRequest("POST", urlPath, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -626,7 +640,7 @@ func (c *Client) CopyObject(bucket, key, sourceBucket, sourceKey string) (*Objec
 }
 
 func (c *Client) ListObjectsPage(bucket string, prefix *string, maxKeys *int, continuationToken *string) (*ObjectPage, error) {
-	urlPath := fmt.Sprintf("%s/buckets/%s/objects", c.baseURL, bucket)
+	urlPath := fmt.Sprintf("%s/buckets/%s/objects", c.baseURL, url.PathEscape(bucket))
 
 	params := url.Values{}
 	if prefix != nil {
@@ -698,7 +712,7 @@ func (c *Client) ListObjects(bucket string, prefix *string, maxKeys *int) ([]Obj
 }
 
 func (c *Client) GetPublicURL(bucket, key string, expirationSecs *uint64, purpose *PublicUrlPurpose) (*PublicURLResponse, error) {
-	urlPath := fmt.Sprintf("%s/buckets/%s/public-url/%s", c.baseURL, bucket, key)
+	urlPath := c.objectURL("public-url", bucket, key)
 
 	params := url.Values{}
 	if expirationSecs != nil {

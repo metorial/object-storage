@@ -137,6 +137,76 @@ async fn test_put_and_get_object() {
 }
 
 #[tokio::test]
+async fn test_percent_encoded_object_keys_are_decoded() {
+    let (service, _temp_dir) = setup_test_service().await;
+    let app = object_store::router::create_router(service.clone());
+
+    service.create_bucket("test-bucket").await.unwrap();
+
+    let keys = [
+        ("dir/notes%231.md", "dir/notes#1.md"),
+        ("dir/100%25.md", "dir/100%.md"),
+        ("dir/what%3F.md", "dir/what?.md"),
+        ("dir/r%C3%A9sum%C3%A9%20%F0%9F%9A%80.md", "dir/résumé 🚀.md"),
+    ];
+
+    for (encoded, key) in keys {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/buckets/test-bucket/objects/{}", encoded))
+                    .body(Body::from(key.as_bytes().to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/buckets/test-bucket/objects/{}", encoded))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], key.as_bytes());
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/buckets/test-bucket/objects")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let mut listed: Vec<String> = json["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|object| object["key"].as_str().unwrap().to_string())
+        .collect();
+    listed.sort();
+    let mut expected: Vec<String> = keys.iter().map(|(_, key)| key.to_string()).collect();
+    expected.sort();
+    assert_eq!(listed, expected);
+}
+
+#[tokio::test]
 async fn test_delete_object() {
     let (service, _temp_dir) = setup_test_service().await;
     let app = object_store::router::create_router(service.clone());
