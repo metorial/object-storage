@@ -1,14 +1,16 @@
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::{IF_RANGE, RANGE};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures::StreamExt;
+use object_store_backends::{BackendError, ByteRange, ObjectMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::error::ServiceResult;
+use crate::error::{ServiceError, ServiceResult};
 use crate::metadata::Bucket;
 use crate::service::ObjectStoreService;
 
@@ -201,15 +203,10 @@ pub async fn put_object(
     Ok(Json(obj_metadata.into()))
 }
 
-pub async fn get_object(
-    State(service): State<SharedService>,
-    Path((bucket, key)): Path<(String, String)>,
-) -> ServiceResult<Response> {
-    let obj_data = service.get_object(&bucket, &key).await?;
-
+fn object_headers(metadata: &ObjectMetadata) -> HeaderMap {
     let mut headers = HeaderMap::new();
 
-    if let Some(ct) = obj_data.metadata.content_type {
+    if let Some(ct) = &metadata.content_type {
         if let Ok(header_value) = ct.parse() {
             headers.insert("content-type", header_value);
         }
@@ -217,8 +214,7 @@ pub async fn get_object(
 
     headers.insert(
         "etag",
-        obj_data
-            .metadata
+        metadata
             .etag
             .parse()
             .unwrap_or_else(|_| "unknown".parse().unwrap()),
@@ -226,26 +222,17 @@ pub async fn get_object(
 
     headers.insert(
         "last-modified",
-        obj_data
-            .metadata
+        metadata
             .last_modified
             .to_rfc2822()
             .parse()
             .unwrap_or_else(|_| "unknown".parse().unwrap()),
     );
 
-    headers.insert(
-        "content-length",
-        obj_data
-            .metadata
-            .size
-            .to_string()
-            .parse()
-            .unwrap_or_else(|_| "0".parse().unwrap()),
-    );
+    headers.insert("accept-ranges", HeaderValue::from_static("bytes"));
 
     // Add custom metadata as x-object-meta-* headers
-    for (key, value) in obj_data.metadata.custom_metadata.iter() {
+    for (key, value) in metadata.custom_metadata.iter() {
         let header_name = format!("x-object-meta-{}", key);
         if let Ok(header_value) = value.parse() {
             if let Ok(header_name) = header_name.parse::<axum::http::HeaderName>() {
@@ -253,6 +240,75 @@ pub async fn get_object(
             }
         }
     }
+
+    headers
+}
+
+fn content_length_header(length: u64) -> HeaderValue {
+    HeaderValue::from_str(&length.to_string()).unwrap_or_else(|_| HeaderValue::from_static("0"))
+}
+
+// A malformed, multi-range or non-`bytes` Range header is ignored and the whole object is served
+// (RFC 9110 14.2); so is any Range sent together with If-Range, since objects are validated by key.
+fn requested_range(headers: &HeaderMap) -> Option<ByteRange> {
+    if headers.contains_key(IF_RANGE) {
+        return None;
+    }
+
+    headers
+        .get(RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(ByteRange::parse_header)
+}
+
+pub async fn get_object(
+    State(service): State<SharedService>,
+    Path((bucket, key)): Path<(String, String)>,
+    request_headers: HeaderMap,
+) -> ServiceResult<Response> {
+    if let Some(range) = requested_range(&request_headers) {
+        return match service.get_object_range(&bucket, &key, range).await {
+            Ok(part) => {
+                let mut headers = object_headers(&part.metadata);
+
+                headers.insert("content-length", content_length_header(part.len()));
+                headers.insert(
+                    "content-range",
+                    HeaderValue::from_str(&format!(
+                        "bytes {}-{}/{}",
+                        part.start, part.end, part.metadata.size
+                    ))
+                    .unwrap_or_else(|_| HeaderValue::from_static("bytes */*")),
+                );
+
+                let body = Body::from_stream(part.stream);
+
+                Ok((StatusCode::PARTIAL_CONTENT, headers, body).into_response())
+            }
+            Err(ServiceError::Backend(BackendError::RangeNotSatisfiable { size })) => {
+                let mut headers = HeaderMap::new();
+
+                headers.insert("accept-ranges", HeaderValue::from_static("bytes"));
+                headers.insert(
+                    "content-range",
+                    HeaderValue::from_str(&format!("bytes */{}", size))
+                        .unwrap_or_else(|_| HeaderValue::from_static("bytes */*")),
+                );
+
+                Ok((StatusCode::RANGE_NOT_SATISFIABLE, headers).into_response())
+            }
+            Err(error) => Err(error),
+        };
+    }
+
+    let obj_data = service.get_object(&bucket, &key).await?;
+
+    let mut headers = object_headers(&obj_data.metadata);
+
+    headers.insert(
+        "content-length",
+        content_length_header(obj_data.metadata.size),
+    );
 
     let body = Body::from_stream(obj_data.stream);
 
@@ -306,6 +362,8 @@ pub async fn head_object(
             .parse()
             .unwrap_or_else(|_| "0".parse().unwrap()),
     );
+
+    headers.insert("accept-ranges", HeaderValue::from_static("bytes"));
 
     // Add custom metadata as x-object-meta-* headers
     for (key, value) in metadata.custom_metadata.iter() {

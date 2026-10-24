@@ -14,7 +14,8 @@ use tokio_util::io::ReaderStream;
 use tracing::{debug, info, warn};
 
 use crate::backend::{
-    Backend, ByteStream, ObjectData, ObjectMetadata, ObjectPage, PublicUrlPurpose,
+    Backend, ByteRange, ByteStream, ObjectData, ObjectMetadata, ObjectPage, ObjectRangeData,
+    PublicUrlPurpose,
 };
 use crate::error::{BackendError, BackendResult};
 use crate::upload::{
@@ -379,6 +380,96 @@ impl Backend for S3Backend {
         }
     }
 
+    async fn get_object_range(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> BackendResult<ObjectRangeData> {
+        match self
+            .client
+            .get_object()
+            .bucket(&self.bucket_name)
+            .key(key)
+            .range(range.to_header())
+            .send()
+            .await
+        {
+            Ok(output) => {
+                let content_type = output.content_type().map(|s| s.to_string());
+                let etag = output.e_tag().map(|s| s.to_string());
+                let part_length = output.content_length().unwrap_or(0) as u64;
+
+                // `Content-Range: bytes <start>-<end>/<total>`
+                let (start, end, total) = output
+                    .content_range()
+                    .and_then(parse_content_range)
+                    .ok_or_else(|| {
+                        BackendError::Provider(format!(
+                            "S3 returned no valid Content-Range for ranged read of '{}'",
+                            key
+                        ))
+                    })?;
+
+                if end - start + 1 != part_length {
+                    return Err(BackendError::Provider(format!(
+                        "S3 range length mismatch for '{}': {}-{} vs {} bytes",
+                        key, start, end, part_length
+                    )));
+                }
+
+                let metadata_map = output
+                    .metadata()
+                    .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_default();
+
+                let last_modified = output
+                    .last_modified()
+                    .and_then(|dt| DateTime::parse_from_rfc3339(&dt.to_string()).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                debug!(
+                    "Retrieved range {}-{} of S3 object: {} ({} bytes of {})",
+                    start, end, key, part_length, total
+                );
+
+                let async_read = output.body.into_async_read();
+                let stream: ByteStream = Box::pin(
+                    ReaderStream::new(async_read)
+                        .map(|result| result.map_err(std::io::Error::other)),
+                );
+
+                Ok(ObjectRangeData {
+                    metadata: Self::s3_metadata_to_object_metadata(
+                        key.to_string(),
+                        total as i64,
+                        last_modified,
+                        etag,
+                        content_type,
+                        metadata_map,
+                    ),
+                    start,
+                    end,
+                    stream,
+                })
+            }
+            Err(e) => {
+                let error_msg = format!("{:?}", e);
+                if error_msg.contains("NoSuchKey") || error_msg.contains("NotFound") {
+                    Err(BackendError::NotFound(key.to_string()))
+                } else if error_msg.contains("InvalidRange") {
+                    let size = self.head_object(key).await?.size;
+                    Err(BackendError::RangeNotSatisfiable { size })
+                } else {
+                    warn!("Failed to get object range from S3: {}: {:?}", key, e);
+                    Err(BackendError::Provider(format!(
+                        "Failed to get object range '{}': {}",
+                        key, e
+                    )))
+                }
+            }
+        }
+    }
+
     async fn head_object(&self, key: &str) -> BackendResult<ObjectMetadata> {
         match self
             .client
@@ -701,9 +792,17 @@ fn encode_copy_source(source: &str) -> String {
     encoded
 }
 
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let rest = value.trim().strip_prefix("bytes ")?;
+    let (range, total) = rest.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+
+    Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::encode_copy_source;
+    use super::{encode_copy_source, parse_content_range};
 
     #[test]
     fn keeps_path_separators_literal() {
@@ -711,6 +810,16 @@ mod tests {
             encode_copy_source("physical/bkt_1/skills/demo/SKILL.md"),
             "physical/bkt_1/skills/demo/SKILL.md"
         );
+    }
+
+    #[test]
+    fn parses_content_range() {
+        assert_eq!(
+            parse_content_range("bytes 0-4095/12345"),
+            Some((0, 4095, 12345))
+        );
+        assert_eq!(parse_content_range("bytes */12345"), None);
+        assert_eq!(parse_content_range("items 0-1/2"), None);
     }
 
     #[test]

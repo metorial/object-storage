@@ -1,7 +1,8 @@
 use bytes::Bytes;
 use object_store_backends::error::BackendError;
 use object_store_backends::{
-    Backend, ByteStream, ObjectData, ObjectMetadata, ObjectPage, PublicUrlPurpose,
+    Backend, ByteRange, ByteStream, ObjectData, ObjectMetadata, ObjectPage, ObjectRangeData,
+    PublicUrlPurpose,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -123,6 +124,24 @@ impl ObjectStoreService {
 
         debug!("Got object: {}/{}", bucket, key);
         Ok(obj_data)
+    }
+
+    pub async fn get_object_range(
+        &self,
+        bucket: &str,
+        key: &str,
+        range: ByteRange,
+    ) -> ServiceResult<ObjectRangeData> {
+        self.metadata.get_bucket(bucket).await?;
+
+        validate_object_key(key)?;
+
+        let full_key = format!("{}/{}", bucket, key);
+
+        let part = self.backend.get_object_range(&full_key, range).await?;
+
+        debug!("Got object range: {}/{} {:?}", bucket, key, range);
+        Ok(part)
     }
 
     pub async fn head_object(&self, bucket: &str, key: &str) -> ServiceResult<ObjectMetadata> {

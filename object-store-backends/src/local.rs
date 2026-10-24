@@ -5,12 +5,13 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info};
 
 use crate::backend::{
-    Backend, ByteStream, ObjectData, ObjectMetadata, ObjectPage, PublicUrlPurpose,
+    Backend, ByteRange, ByteStream, ObjectData, ObjectMetadata, ObjectPage, ObjectRangeData,
+    PublicUrlPurpose,
 };
 use crate::error::{BackendError, BackendResult};
 
@@ -144,6 +145,43 @@ impl Backend for LocalBackend {
             Box::pin(ReaderStream::new(file).map(|result| result.map_err(std::io::Error::other)));
 
         Ok(ObjectData { metadata, stream })
+    }
+
+    async fn get_object_range(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> BackendResult<ObjectRangeData> {
+        debug!("Getting object range: {} {:?}", key, range);
+
+        let object_path = self.get_full_path(key)?;
+
+        if !object_path.exists() {
+            return Err(BackendError::NotFound(key.to_string()));
+        }
+
+        let metadata = self.read_metadata(key).await?;
+        let (start, end) =
+            range
+                .resolve(metadata.size)
+                .ok_or(BackendError::RangeNotSatisfiable {
+                    size: metadata.size,
+                })?;
+
+        let mut file = fs::File::open(&object_path).await?;
+        file.seek(std::io::SeekFrom::Start(start)).await?;
+
+        let stream: ByteStream = Box::pin(
+            ReaderStream::new(file.take(end - start + 1))
+                .map(|result| result.map_err(std::io::Error::other)),
+        );
+
+        Ok(ObjectRangeData {
+            metadata,
+            start,
+            end,
+            stream,
+        })
     }
 
     async fn head_object(&self, key: &str) -> BackendResult<ObjectMetadata> {

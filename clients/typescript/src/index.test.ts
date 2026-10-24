@@ -119,6 +119,53 @@ describe('ObjectStorageClient', () => {
     });
   });
 
+  describe('getObjectRange', () => {
+    it('should read part of an object', async () => {
+      mock
+        .onGet('/buckets/test-bucket/objects/test-key', undefined, expect.objectContaining({ Range: 'bytes=2-5' }))
+        .reply(206, Buffer.from('2345'), {
+          'content-type': 'text/plain',
+          'content-length': '4',
+          'content-range': 'bytes 2-5/10',
+          etag: 'abc123',
+          'last-modified': '2024-01-01T00:00:00Z',
+        });
+
+      const part = await client.getObjectRange('test-bucket', 'test-key', { start: 2, end: 5 });
+
+      expect(part.data.toString()).toBe('2345');
+      expect(part.range).toEqual({ start: 2, end: 5, total: 10 });
+      expect(part.metadata.size).toBe(10);
+      expect(part.metadata.etag).toBe('abc123');
+    });
+
+    it('should send open-ended and suffix ranges', async () => {
+      mock.onGet('/buckets/test-bucket/objects/test-key').reply(config => {
+        expect(['bytes=6-', 'bytes=-3']).toContain(config.headers?.Range);
+        return [206, Buffer.from('xyz'), { 'content-range': 'bytes 7-9/10' }];
+      });
+
+      await client.getObjectRange('test-bucket', 'test-key', { start: 6 });
+      await client.getObjectRange('test-bucket', 'test-key', { suffix: 3 });
+    });
+
+    it('should throw with status 416 when the range is not satisfiable', async () => {
+      mock.onGet('/buckets/test-bucket/objects/test-key').reply(416, '');
+
+      await expect(
+        client.getObjectRange('test-bucket', 'test-key', { start: 100 })
+      ).rejects.toMatchObject({ statusCode: 416 });
+    });
+
+    it('should refuse a full response from a server without range support', async () => {
+      mock.onGet('/buckets/test-bucket/objects/test-key').reply(200, Buffer.from('0123456789'));
+
+      await expect(
+        client.getObjectRange('test-bucket', 'test-key', { start: 0, end: 1 })
+      ).rejects.toMatchObject({ statusCode: 200 });
+    });
+  });
+
   describe('headObject', () => {
     it('should head an object', async () => {
       mock.onHead('/buckets/test-bucket/objects/test-key').reply(200, undefined, {

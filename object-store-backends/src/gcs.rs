@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 use crate::backend::{
-    Backend, ByteStream, ObjectData, ObjectMetadata, ObjectPage, PublicUrlPurpose,
+    Backend, ByteRange, ByteStream, ObjectData, ObjectMetadata, ObjectPage, ObjectRangeData,
+    PublicUrlPurpose,
 };
 use crate::error::{BackendError, BackendResult};
 use crate::upload::{into_sync_stream, ChunkedUpload, SINGLE_REQUEST_THRESHOLD};
@@ -221,6 +222,68 @@ impl Backend for GcsBackend {
                     warn!("Failed to get object from GCS: {}: {:?}", key, e);
                     Err(BackendError::Provider(format!(
                         "Failed to get object '{}': {}",
+                        key, e
+                    )))
+                }
+            }
+        }
+    }
+
+    async fn get_object_range(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> BackendResult<ObjectRangeData> {
+        let metadata = self.head_object(key).await?;
+        let (start, end) =
+            range
+                .resolve(metadata.size)
+                .ok_or(BackendError::RangeNotSatisfiable {
+                    size: metadata.size,
+                })?;
+
+        let request = GetObjectRequest {
+            bucket: self.bucket_name.clone(),
+            object: key.to_string(),
+            ..Default::default()
+        };
+
+        match self
+            .client
+            .download_object(&request, &Range(Some(start), Some(end)))
+            .await
+        {
+            Ok(data) => {
+                debug!(
+                    "Retrieved range {}-{} of GCS object: {} ({} bytes)",
+                    start,
+                    end,
+                    key,
+                    data.len()
+                );
+
+                let stream: ByteStream =
+                    Box::pin(futures::stream::once(async move { Ok(Bytes::from(data)) }));
+
+                Ok(ObjectRangeData {
+                    metadata,
+                    start,
+                    end,
+                    stream,
+                })
+            }
+            Err(e) => {
+                let error_msg = format!("{:?}", e);
+                if error_msg.contains("404") || error_msg.contains("NotFound") {
+                    Err(BackendError::NotFound(key.to_string()))
+                } else if error_msg.contains("416") {
+                    Err(BackendError::RangeNotSatisfiable {
+                        size: metadata.size,
+                    })
+                } else {
+                    warn!("Failed to get object range from GCS: {}: {:?}", key, e);
+                    Err(BackendError::Provider(format!(
+                        "Failed to get object range '{}': {}",
                         key, e
                     )))
                 }

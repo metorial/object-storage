@@ -93,6 +93,15 @@ const objData = await client.getObject('bucket-name', 'object-key');
 // objData.metadata contains metadata
 ```
 
+**Get Part of an Object**
+```typescript
+// The first 4 KiB (end is inclusive), the tail, or everything from an offset
+const head = await client.getObjectRange('bucket-name', 'object-key', { start: 0, end: 4095 });
+const tail = await client.getObjectRange('bucket-name', 'object-key', { suffix: 1024 });
+// head.data is the buffer, head.range is { start, end, total }
+// Throws ObjectStorageError with status 416 if the range is outside the object
+```
+
 **Head Object**
 ```typescript
 const metadata = await client.headObject('bucket-name', 'object-key');

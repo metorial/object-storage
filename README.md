@@ -210,6 +210,16 @@ Custom metadata headers must be prefixed with `x-object-meta-`.
 GET /buckets/{bucket}/objects/{key}
 ```
 
+**Download part of an object:** send a single `Range: bytes=start-end`, `bytes=start-` or `bytes=-length`
+header. The backend reads only that range (`206 Partial Content` with `Content-Range`); a range outside
+the object returns `416` with `Content-Range: bytes */size`. Malformed or multi-range headers, and any
+`Range` sent with `If-Range`, are ignored and the whole object is returned. `GET` and `HEAD` responses
+carry `Accept-Ranges: bytes`.
+```
+GET /buckets/{bucket}/objects/{key}
+Range: bytes=0-4095
+```
+
 **Get object metadata:**
 ```
 HEAD /buckets/{bucket}/objects/{key}

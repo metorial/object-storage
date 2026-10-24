@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 use crate::backend::{
-    Backend, ByteStream, ObjectData, ObjectMetadata, ObjectPage, PublicUrlPurpose,
+    Backend, ByteRange, ByteStream, ObjectData, ObjectMetadata, ObjectPage, ObjectRangeData,
+    PublicUrlPurpose,
 };
 use crate::error::{BackendError, BackendResult};
 use crate::upload::{ChunkedUpload, MULTIPART_PART_SIZE, SINGLE_REQUEST_THRESHOLD};
@@ -303,6 +304,76 @@ impl Backend for AzureBackend {
                 }
             }
         }
+    }
+
+    async fn get_object_range(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> BackendResult<ObjectRangeData> {
+        let metadata = self.head_object(key).await?;
+        let (start, end) =
+            range
+                .resolve(metadata.size)
+                .ok_or(BackendError::RangeNotSatisfiable {
+                    size: metadata.size,
+                })?;
+
+        let blob_client = self.client.blob_client(key);
+        let mut pages = blob_client.get().range(start..end + 1).into_stream();
+        let mut data: Vec<u8> = Vec::with_capacity((end - start + 1) as usize);
+
+        while let Some(page) = pages.next().await {
+            match page {
+                Ok(response) => match response.data.collect().await {
+                    Ok(chunk) => data.extend_from_slice(&chunk),
+                    Err(e) => {
+                        warn!("Failed to read blob range from Azure: {}: {:?}", key, e);
+                        return Err(BackendError::Provider(format!(
+                            "Failed to read blob range '{}': {}",
+                            key, e
+                        )));
+                    }
+                },
+                Err(e) => {
+                    let error_msg = format!("{:?}", e);
+                    return if error_msg.contains("404")
+                        || error_msg.contains("NotFound")
+                        || error_msg.contains("BlobNotFound")
+                    {
+                        Err(BackendError::NotFound(key.to_string()))
+                    } else if error_msg.contains("416") || error_msg.contains("InvalidRange") {
+                        Err(BackendError::RangeNotSatisfiable {
+                            size: metadata.size,
+                        })
+                    } else {
+                        warn!("Failed to get blob range from Azure: {}: {:?}", key, e);
+                        Err(BackendError::Provider(format!(
+                            "Failed to get blob range '{}': {}",
+                            key, e
+                        )))
+                    };
+                }
+            }
+        }
+
+        debug!(
+            "Retrieved range {}-{} of Azure blob: {} ({} bytes)",
+            start,
+            end,
+            key,
+            data.len()
+        );
+
+        let stream: ByteStream =
+            Box::pin(futures::stream::once(async move { Ok(Bytes::from(data)) }));
+
+        Ok(ObjectRangeData {
+            metadata,
+            start,
+            end,
+            stream,
+        })
     }
 
     async fn head_object(&self, key: &str) -> BackendResult<ObjectMetadata> {

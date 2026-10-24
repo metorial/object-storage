@@ -30,6 +30,16 @@ export interface ObjectData {
   data: Buffer;
 }
 
+export type ByteRange =
+  | { start: number; end?: number }
+  | { suffix: number };
+
+export interface ObjectRangeData {
+  metadata: ObjectMetadata;
+  data: Buffer;
+  range: { start: number; end: number; total: number };
+}
+
 interface CreateBucketRequest {
   name: string;
 }
@@ -210,6 +220,67 @@ export class ObjectStorageClient {
         data: Buffer.from(response.data),
       };
     } catch (error) {
+      this.handleError(error as AxiosError);
+    }
+  }
+
+  /**
+   * Reads only part of an object. `end` is inclusive; `{ suffix: n }` reads the last n bytes.
+   * Throws an `ObjectStorageError` with status 416 when the range is outside the object, and with
+   * status 200 if the server answered with the whole object because it does not support ranges.
+   */
+  async getObjectRange(
+    bucket: string,
+    key: string,
+    range: ByteRange
+  ): Promise<ObjectRangeData> {
+    const header =
+      'suffix' in range
+        ? `bytes=-${range.suffix}`
+        : `bytes=${range.start}-${range.end ?? ''}`;
+
+    try {
+      const response = await this.client.get<Buffer>(`/buckets/${bucket}/objects/${key}`, {
+        responseType: 'arraybuffer',
+        headers: { Range: header },
+      });
+
+      const contentRange = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(
+        String(response.headers['content-range'] || '')
+      );
+
+      if (response.status !== 206 || !contentRange) {
+        throw new ObjectStorageError(
+          response.status,
+          'Server did not honour the range request'
+        );
+      }
+
+      const start = parseInt(contentRange[1]!, 10);
+      const end = parseInt(contentRange[2]!, 10);
+      const total = parseInt(contentRange[3]!, 10);
+
+      const metadata: Record<string, string> = {};
+      for (const [headerName, headerValue] of Object.entries(response.headers)) {
+        if (headerName.startsWith('x-object-meta-')) {
+          metadata[headerName.substring('x-object-meta-'.length)] = String(headerValue);
+        }
+      }
+
+      return {
+        metadata: {
+          key,
+          size: total,
+          content_type: response.headers['content-type'],
+          etag: response.headers['etag'] || '',
+          last_modified: response.headers['last-modified'] || '',
+          metadata,
+        },
+        data: Buffer.from(response.data),
+        range: { start, end, total },
+      };
+    } catch (error) {
+      if (error instanceof ObjectStorageError) throw error;
       this.handleError(error as AxiosError);
     }
   }

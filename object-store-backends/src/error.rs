@@ -8,6 +8,9 @@ pub enum BackendError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("Range not satisfiable for object of {size} bytes")]
+    RangeNotSatisfiable { size: u64 },
+
     #[error("Provider error: {0}")]
     Provider(String),
 

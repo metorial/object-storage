@@ -784,3 +784,219 @@ async fn test_concurrent_bucket_creation() {
     let result = service.create_bucket("concurrent-0").await;
     assert!(result.is_err(), "Duplicate bucket creation should fail");
 }
+
+async fn put_bytes(service: &Arc<ObjectStoreService>, bucket: &str, key: &str, data: Vec<u8>) {
+    let stream: object_store_backends::ByteStream =
+        Box::pin(stream::once(async move { Ok(Bytes::from(data)) }));
+    service
+        .put_object(
+            bucket,
+            key,
+            stream,
+            Some("text/plain".to_string()),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+}
+
+async fn get_with_range(
+    app: &axum::Router,
+    range: Option<&str>,
+    extra: Option<(&str, &str)>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder().uri("/buckets/range-bucket/objects/digits.txt");
+
+    if let Some(range) = range {
+        builder = builder.header("range", range);
+    }
+    if let Some((name, value)) = extra {
+        builder = builder.header(name, value);
+    }
+
+    let response = app
+        .clone()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+
+    (status, headers, body)
+}
+
+#[tokio::test]
+async fn test_get_object_range() {
+    let (service, _temp_dir) = setup_test_service().await;
+    let app = object_store::router::create_router(service.clone());
+
+    service.create_bucket("range-bucket").await.unwrap();
+    put_bytes(
+        &service,
+        "range-bucket",
+        "digits.txt",
+        b"0123456789".to_vec(),
+    )
+    .await;
+
+    let (status, headers, body) = get_with_range(&app, Some("bytes=2-5"), None).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body, b"2345");
+    assert_eq!(headers.get("content-range").unwrap(), "bytes 2-5/10");
+    assert_eq!(headers.get("content-length").unwrap(), "4");
+    assert_eq!(headers.get("accept-ranges").unwrap(), "bytes");
+    assert_eq!(headers.get("content-type").unwrap(), "text/plain");
+
+    // End past the object is clamped
+    let (status, headers, body) = get_with_range(&app, Some("bytes=7-999"), None).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body, b"789");
+    assert_eq!(headers.get("content-range").unwrap(), "bytes 7-9/10");
+
+    // Open-ended and suffix ranges
+    let (status, _, body) = get_with_range(&app, Some("bytes=6-"), None).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body, b"6789");
+
+    let (status, headers, body) = get_with_range(&app, Some("bytes=-3"), None).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body, b"789");
+    assert_eq!(headers.get("content-range").unwrap(), "bytes 7-9/10");
+
+    // A suffix longer than the object returns the whole object
+    let (status, headers, body) = get_with_range(&app, Some("bytes=-500"), None).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body, b"0123456789");
+    assert_eq!(headers.get("content-range").unwrap(), "bytes 0-9/10");
+}
+
+#[tokio::test]
+async fn test_get_object_range_not_satisfiable() {
+    let (service, _temp_dir) = setup_test_service().await;
+    let app = object_store::router::create_router(service.clone());
+
+    service.create_bucket("range-bucket").await.unwrap();
+    put_bytes(
+        &service,
+        "range-bucket",
+        "digits.txt",
+        b"0123456789".to_vec(),
+    )
+    .await;
+
+    for range in ["bytes=10-", "bytes=10-20", "bytes=-0"] {
+        let (status, headers, body) = get_with_range(&app, Some(range), None).await;
+        assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE, "{range}");
+        assert_eq!(
+            headers.get("content-range").unwrap(),
+            "bytes */10",
+            "{range}"
+        );
+        assert!(body.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_get_object_ignores_unsupported_range_headers() {
+    let (service, _temp_dir) = setup_test_service().await;
+    let app = object_store::router::create_router(service.clone());
+
+    service.create_bucket("range-bucket").await.unwrap();
+    put_bytes(
+        &service,
+        "range-bucket",
+        "digits.txt",
+        b"0123456789".to_vec(),
+    )
+    .await;
+
+    for range in ["bytes=0-1,4-5", "items=0-1", "bytes=5-2", "bytes=abc"] {
+        let (status, headers, body) = get_with_range(&app, Some(range), None).await;
+        assert_eq!(status, StatusCode::OK, "{range}");
+        assert_eq!(body, b"0123456789", "{range}");
+        assert!(headers.get("content-range").is_none());
+    }
+
+    let (status, _, body) =
+        get_with_range(&app, Some("bytes=0-1"), Some(("if-range", "\"anything\""))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"0123456789");
+}
+
+#[tokio::test]
+async fn test_get_object_range_of_missing_object_and_empty_object() {
+    let (service, _temp_dir) = setup_test_service().await;
+    let app = object_store::router::create_router(service.clone());
+
+    service.create_bucket("range-bucket").await.unwrap();
+
+    let (status, _, _) = get_with_range(&app, Some("bytes=0-1"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    put_bytes(&service, "range-bucket", "digits.txt", Vec::new()).await;
+
+    let (status, headers, _) = get_with_range(&app, Some("bytes=0-0"), None).await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(headers.get("content-range").unwrap(), "bytes */0");
+}
+
+#[tokio::test]
+async fn test_get_object_range_reads_only_the_requested_part_of_a_large_object() {
+    let (service, _temp_dir) = setup_test_service().await;
+    let app = object_store::router::create_router(service.clone());
+
+    service.create_bucket("range-bucket").await.unwrap();
+
+    let size: usize = 24 * 1024 * 1024;
+    let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    put_bytes(&service, "range-bucket", "digits.txt", data.clone()).await;
+
+    let start = size - 5000;
+    let range = format!("bytes={}-{}", start, start + 99);
+    let (status, headers, body) = get_with_range(&app, Some(&range), None).await;
+
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body.len(), 100);
+    assert_eq!(body, data[start..start + 100]);
+    assert_eq!(
+        headers.get("content-range").unwrap().to_str().unwrap(),
+        format!("bytes {}-{}/{}", start, start + 99, size)
+    );
+}
+
+#[tokio::test]
+async fn test_head_and_full_get_advertise_range_support() {
+    let (service, _temp_dir) = setup_test_service().await;
+    let app = object_store::router::create_router(service.clone());
+
+    service.create_bucket("range-bucket").await.unwrap();
+    put_bytes(
+        &service,
+        "range-bucket",
+        "digits.txt",
+        b"0123456789".to_vec(),
+    )
+    .await;
+
+    let (status, headers, body) = get_with_range(&app, None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"0123456789");
+    assert_eq!(headers.get("accept-ranges").unwrap(), "bytes");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri("/buckets/range-bucket/objects/digits.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.headers().get("accept-ranges").unwrap(), "bytes");
+}
